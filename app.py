@@ -272,7 +272,45 @@ def cron_master():
                 'reason': f'Outside market hours or non-working day. Market: {is_market_hours}, Working day: {is_working_day}'
             })
         
-        # 3. DAILY SUMMARY - Once per day at 16:30 (after market close)
+        # 3. NEWS MONITORING - Every 30 minutes (at :00 and :30)
+        # Check if current minute is 0 or 30 (within ±2 minutes for tolerance)
+        current_minute = now_ist.minute
+        should_run_news = (
+            current_minute in range(0, 3) or        # :00-:02
+            current_minute in range(28, 33) or      # :28-:32 (covers :30)
+            current_minute in range(58, 61)         # :58-:00 (covers next :00)
+        )
+        
+        if should_run_news:
+            # Check if already run in the last 25 minutes to prevent duplicates
+            last_25_min = now_ist - timedelta(minutes=25)
+            try:
+                recent_runs = sb.table('cron_run_logs').select('created_at').eq('job', 'news_monitoring').gte('created_at', last_25_min.isoformat()).execute()
+                if recent_runs.data:
+                    results['skipped_jobs'].append({
+                        'name': 'news_monitoring',
+                        'reason': 'Already executed within last 25 minutes'
+                    })
+                else:
+                    jobs_to_run.append({
+                        'name': 'news_monitoring',
+                        'condition': True,
+                        'reason': f'30-minute schedule: {now_ist.strftime("%H:%M")} (target: :00/:30)'
+                    })
+            except Exception:
+                # If we can't check, run anyway to be safe
+                jobs_to_run.append({
+                    'name': 'news_monitoring',
+                    'condition': True,
+                    'reason': f'30-minute schedule: {now_ist.strftime("%H:%M")} (could not verify recent runs)'
+                })
+        else:
+            results['skipped_jobs'].append({
+                'name': 'news_monitoring',
+                'reason': f'Not scheduled time. Current: {now_ist.strftime("%H:%M")}, Target: :00/:30 (±2min)'
+            })
+        
+        # 4. DAILY SUMMARY - Once per day at 16:30 (after market close)
         summary_time_target = now_ist.replace(hour=16, minute=30, second=0, microsecond=0)
         time_diff = abs((now_ist - summary_time_target).total_seconds() / 60)  # difference in minutes
         

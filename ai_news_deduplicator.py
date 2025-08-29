@@ -79,7 +79,7 @@ class AINewsDeduplicator:
             # Get AI response
             response = self.model.generate_content(prompt)
             
-            if response and response.text:
+            if response and hasattr(response, 'text') and response.text:
                 # Parse AI response
                 clusters = self._parse_ai_response(response.text, articles)
                 
@@ -186,20 +186,37 @@ IMPORTANT:
                     raise ValueError("No JSON found in response")
             
             # Parse JSON
-            ai_result = json.loads(json_text)
+            try:
+                ai_result = json.loads(json_text)
+            except json.JSONDecodeError as json_error:
+                print(f"JSON parsing error: {json_error}")
+                return []
+            
+            if not isinstance(ai_result, dict) or 'clusters' not in ai_result:
+                print("Invalid AI response format: missing clusters")
+                return []
+                
             clusters = []
             
             for cluster_data in ai_result.get('clusters', []):
+                if not cluster_data:  # Skip None or empty cluster data
+                    continue
+                    
                 primary_id = cluster_data.get('primary_article_id')
                 related_ids = cluster_data.get('related_article_ids', [])
                 confidence = cluster_data.get('confidence', 0.0)
                 reason = cluster_data.get('reason', '')
                 
+                # Ensure related_ids is a list, not None
+                if related_ids is None:
+                    related_ids = []
+                
                 # Validate cluster data
                 if (primary_id is not None and 
                     0 <= primary_id < len(articles) and 
                     confidence >= 0.8 and
-                    all(0 <= rid < len(articles) for rid in related_ids)):
+                    isinstance(related_ids, list) and
+                    all(isinstance(rid, int) and 0 <= rid < len(articles) for rid in related_ids)):
                     
                     cluster = {
                         'primary_article_id': primary_id,
