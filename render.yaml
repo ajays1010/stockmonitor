@@ -1,0 +1,91 @@
+services:
+  - type: web
+    name: bse-monitor
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 2 -k gthread -t 120 -b 0.0.0.0:$PORT app:app
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: FLASK_SECRET_KEY
+        sync: false
+      - key: FLASK_DEBUG
+        value: "0"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: CRON_SECRET_KEY
+        sync: false
+      # Firebase Admin SDK Configuration
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      # Firebase Client Configuration (for frontend)
+      - key: FIREBASE_API_KEY
+        sync: false
+      - key: FIREBASE_AUTH_DOMAIN
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_STORAGE_BUCKET
+        sync: false
+      - key: FIREBASE_MESSAGING_SENDER_ID
+        sync: false
+      - key: FIREBASE_APP_ID
+        sync: false
+      # AI Configuration
+      - key: GEMINI_API_KEY
+        sync: false
+      # NewsData.io Configuration (for sentiment analysis)
+      - key: NEWSDATA_API_KEY
+        sync: false
+      # Performance Tuning
+      - key: YAHOO_CACHE_TTL
+        value: "60"
+      - key: YAHOO_VERBOSE
+        value: "0"
+      - key: BSE_VERBOSE
+        value: "1"
+    # Cron Jobs
+  
+  # 1. Price Spike Monitoring (Every 5 minutes during market hours)
+  - type: cron
+    name: price-spike-monitor
+    env: python
+    schedule: "*/5 3-10 * * 1-5"  # Every 5 minutes from 9:00 AM to 3:30 PM IST (3:30 AM to 10:00 AM UTC), Monday to Friday
+    buildCommand: pip install -r requirements.txt
+    startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/hourly_spike_alerts?key=$CRON_SECRET_KEY" || exit 1
+    envVars:
+      - key: CRON_SECRET_KEY
+        sync: false
+
+  # 2. Evening Summary (Once daily at 7:35 PM IST - TESTING)
+  - type: cron
+    name: evening-summary
+    env: python
+    schedule: "0 3 * * 1-5"  # 8:30 AM IST = 3:00 AM UTC (Monday to Friday)
+    buildCommand: pip install -r requirements.txt
+    startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/evening_summary?key=$CRON_SECRET_KEY&force=true" || exit 1
+    envVars:
+      - key: CRON_SECRET_KEY
+        sync: false
+
+  # 3. BSE Announcements Monitoring (Every 5 minutes, 24/7)
+  - type: cron
+    name: bse-announcements-monitor
+    env: python
+    schedule: "*/5 * * * *"  # Every 5 minutes, 24 hours a day, 7 days a week
+    buildCommand: pip install -r requirements.txt
+    startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/bse_announcements?key=$CRON_SECRET_KEY" || exit 1
+    envVars:
+      - key: CRON_SECRET_KEY
+        sync: false
+
+
+
+
