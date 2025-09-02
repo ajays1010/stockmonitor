@@ -318,7 +318,7 @@ def store_news_article(user_client, article: Dict, stock_query: str, user_ids: L
             else:
                 article_id = hashlib.md5(str(datetime.now()).encode()).hexdigest()[:16]
         
-        # Prepare article data
+        # Prepare article data - only include fields that exist in database
         article_data = {
             'article_id': article_id,
             'title': article.get('title', ''),
@@ -327,15 +327,20 @@ def store_news_article(user_client, article: Dict, stock_query: str, user_ids: L
             'pub_date': article.get('pubDate', article.get('published_at', '')),
             'stock_query': stock_query,
             'sent_to_users': user_ids,
-            'is_clustered': article.get('is_clustered', False),
-            'duplicate_count': article.get('duplicate_count', 0),
-            'cluster_reason': article.get('cluster_reason', ''),
-            'source_type': article.get('source_type', 'unknown')
         }
+        
+        # Add optional fields only if they might exist in database schema
+        if article.get('source_type'):
+            article_data['source_type'] = article.get('source_type', 'unknown')
+        
+        # Don't include fields that may not exist in database schema:
+        # - is_clustered
+        # - duplicate_count  
+        # - cluster_reason
         
         user_client.table('processed_news_articles').insert(article_data).execute()
         
-        # Store clustered articles as well (for future reference)
+        # Store clustered articles as well (for future reference) - only basic fields
         if article.get('is_clustered') and article.get('merged_urls'):
             merged_urls = article.get('merged_urls', [])
             merged_sources = article.get('merged_sources', [])
@@ -345,6 +350,7 @@ def store_news_article(user_client, article: Dict, stock_query: str, user_ids: L
                     clustered_id = hashlib.md5(url.encode()).hexdigest()[:16]
                     source_name = merged_sources[idx] if len(merged_sources) > idx else f"Source {idx+1}"
                     
+                    # Only include basic fields that exist in database
                     clustered_data = {
                         'article_id': clustered_id,
                         'title': f"[Clustered] {article.get('title', '')}",
@@ -353,10 +359,11 @@ def store_news_article(user_client, article: Dict, stock_query: str, user_ids: L
                         'pub_date': article.get('pubDate', ''),
                         'stock_query': stock_query,
                         'sent_to_users': user_ids,
-                        'is_clustered': True,
-                        'cluster_parent_id': article_id,
-                        'source_type': 'clustered'
                     }
+                    
+                    # Add optional fields if they might exist
+                    if article.get('source_type'):
+                        clustered_data['source_type'] = 'clustered'
                     
                     try:
                         user_client.table('processed_news_articles').insert(clustered_data).execute()
@@ -544,7 +551,20 @@ def send_news_alerts(user_client, user_id: str, monitored_scrips: List[Dict], te
                         if os.environ.get('BSE_VERBOSE', '0') == '1':
                             print(f"NEWS: Sent enhanced news alert for {company_name} to {chat_id}")
                     else:
-                        print(f"NEWS: Telegram API error for {chat_id}: {response.text}")
+                        # Parse Telegram API error for better handling
+                        try:
+                            error_data = response.json()
+                            error_code = error_data.get('error_code', 'unknown')
+                            error_desc = error_data.get('description', 'unknown')
+                            
+                            if error_code == 400 and 'chat not found' in error_desc.lower():
+                                print(f"NEWS: Chat {chat_id} not found - user may have blocked bot or deleted chat")
+                            elif error_code == 403 and 'bot was blocked' in error_desc.lower():
+                                print(f"NEWS: Bot was blocked by user {chat_id}")
+                            else:
+                                print(f"NEWS: Telegram API error for {chat_id}: {error_desc} (code: {error_code})")
+                        except:
+                            print(f"NEWS: Telegram API error for {chat_id}: {response.text}")
                         
                 except Exception as send_error:
                     print(f"NEWS: Error sending to {chat_id}: {send_error}")

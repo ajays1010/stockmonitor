@@ -412,9 +412,9 @@ def cron_master():
                             from bulk_deals_monitor import send_bulk_deals_alerts
                             sent = send_bulk_deals_alerts(sb, uid, scrips, recipients)
                         elif job_name == 'news_monitoring':
-                            # Import and use news monitoring (sends NEWS only, not sentiment)
-                            from news_monitor import send_news_alerts
-                            sent = send_news_alerts(sb, uid, scrips, recipients)
+                            # Import and use ENHANCED news monitoring (crisp summaries, today's news only)
+                            from enhanced_news_monitor import enhanced_send_news_alerts
+                            sent = enhanced_send_news_alerts(sb, uid, scrips, recipients)
                         else:
                             continue
                         

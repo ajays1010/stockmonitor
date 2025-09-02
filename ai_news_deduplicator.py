@@ -269,7 +269,7 @@ IMPORTANT:
                     primary_article['merged_sources'] = all_sources
                     primary_article['merged_urls'] = all_urls
                     primary_article['duplicate_count'] = len(related_ids)
-                    primary_article['cluster_reason'] = cluster.get('reason', '')
+                    # Removed cluster_reason as it doesn't exist in database schema
                     primary_article['cluster_confidence'] = cluster.get('confidence', 0.0)
                     primary_article['is_clustered'] = True
                     
