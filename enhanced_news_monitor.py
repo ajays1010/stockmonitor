@@ -435,42 +435,78 @@ def check_news_already_sent_today(user_client, article: Dict, company_name: str)
         return False
 
 def store_news_article_enhanced(user_client, article: Dict, company_name: str, user_ids: List[str]):
-    """Store article with enhanced tracking - only include fields that exist in database"""
+    """Store article with enhanced tracking - BULLETPROOF database-safe version"""
     try:
-        # Basic article data that should exist in database
-        article_data = {
-            'article_id': article.get('article_id', article.get('link', '')),
-            'title': article.get('title', ''),
-            'description': article.get('description', ''),
-            'url': article.get('link', article.get('url', '')),
-            'source_name': article.get('source', 'Unknown'),
-            'pub_date': article.get('pubDate', ''),
-            'stock_query': company_name,
-            'sent_to_users': user_ids,
+        # DEFENSIVE APPROACH: Extract fields safely and create completely clean data structure
+        # This prevents ANY problematic fields from reaching the database
+        
+        # Extract article ID safely
+        article_id = ''
+        if article.get('article_id'):
+            article_id = str(article.get('article_id', ''))
+        elif article.get('link'):
+            article_id = str(article.get('link', ''))
+        elif article.get('url'):
+            article_id = str(article.get('url', ''))
+        else:
+            # Generate a unique ID if none available
+            import hashlib
+            import time
+            article_id = hashlib.md5(f"{company_name}_{time.time()}".encode()).hexdigest()[:16]
+        
+        # Extract other fields safely
+        title = str(article.get('title', '') or '').strip()
+        description = str(article.get('description', '') or '').strip()
+        
+        # Get URL - try multiple possible field names
+        url = ''
+        if article.get('url'):
+            url = str(article.get('url', ''))
+        elif article.get('link'):
+            url = str(article.get('link', ''))
+        
+        # Get source name safely
+        source_name = str(article.get('source', article.get('source_name', 'Unknown')) or 'Unknown').strip()
+        
+        # Get publication date safely
+        pub_date = str(article.get('pubDate', article.get('published_at', '')) or '').strip()
+        
+        # Get source type safely (optional)
+        source_type = str(article.get('source_type', '') or '').strip()
+        
+        # Create ONLY the fields that exist in database - HARDCODED list for safety
+        safe_article_data = {
+            'article_id': article_id,
+            'title': title,
+            'description': description,
+            'url': url,
+            'source_name': source_name,
+            'pub_date': pub_date,
+            'stock_query': str(company_name or '').strip(),
+            'sent_to_users': user_ids or []
         }
         
-        # Add optional fields only if they exist
-        if article.get('source_type'):
-            article_data['source_type'] = article.get('source_type', 'enhanced')
+        # Add source_type only if it has a value
+        if source_type:
+            safe_article_data['source_type'] = source_type
         
-        # Don't include fields that may not exist in database schema
-        # - cluster_reason
-        # - date_filter
-        # - is_clustered
-        # - cluster_parent_id
-        
-        user_client.table('processed_news_articles').insert(article_data).execute()
+        # DATABASE INSERT - using only safe fields
+        user_client.table('processed_news_articles').insert(safe_article_data).execute()
         
         if os.environ.get('BSE_VERBOSE', '0') == '1':
-            print(f"NEWS: Stored article {article_data.get('article_id', 'unknown')} for {company_name}")
+            print(f"NEWS: Stored article {article_id[:12]}... for {company_name}")
             
     except Exception as e:
-        # More detailed error logging
+        # Enhanced error logging with field information
         error_msg = str(e)
         if 'column' in error_msg and 'schema cache' in error_msg:
-            print(f"NEWS: Database schema error - skipping article storage: {error_msg}")
+            print(f"NEWS: Database schema error - article storage skipped: {error_msg}")
+            print(f"NEWS: This should NOT happen anymore - please report this error")
+        elif 'PGRST204' in error_msg:
+            print(f"NEWS: PostgREST schema error - article storage skipped: {error_msg}")
+            print(f"NEWS: This indicates a remaining schema mismatch")
         else:
-            print(f"NEWS: Error storing enhanced article: {e}")
+            print(f"NEWS: Article storage error: {e}")
 
 # For compatibility with existing system
 def send_news_alerts_enhanced(user_client, user_id: str, monitored_scrips: List[Dict], telegram_recipients: List[Dict]) -> int:
