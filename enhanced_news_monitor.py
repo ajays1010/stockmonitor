@@ -17,6 +17,7 @@ Key Improvements:
 import os
 import requests
 import json
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 import time
@@ -34,6 +35,76 @@ try:
 except ImportError:
     AI_DEDUPLICATION_AVAILABLE = False
 
+def check_news_already_sent(user_client, article: Dict, company_name: str) -> bool:
+    """
+    Check if news article has already been sent for this company
+    Returns True if already sent, False if new
+    """
+    try:
+        # Generate a unique ID for the article based on URL or title
+        article_id = article.get('article_id', '')
+        if not article_id:
+            url = article.get('link', article.get('url', ''))
+            title = article.get('title', '')
+            if url:
+                article_id = hashlib.md5(url.encode()).hexdigest()[:16]
+            elif title:
+                article_id = hashlib.md5(title.encode()).hexdigest()[:16]
+            else:
+                article_id = hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:16]
+        
+        # Check if this article has been processed for this company in the last 48 hours
+        cutoff_date = datetime.now() - timedelta(hours=48)
+        
+        result = user_client.table('processed_news_articles')\
+            .select('id')\
+            .eq('article_id', article_id)\
+            .eq('stock_query', company_name)\
+            .gte('created_at', cutoff_date.isoformat())\
+            .execute()
+        
+        return len(result.data) > 0
+        
+    except Exception as e:
+        if os.environ.get('BSE_VERBOSE', '0') == '1':
+            print(f"Error checking news duplication: {e}")
+        return False  # If there's an error, assume it's a new article
+
+def store_sent_news_article(user_client, article: Dict, company_name: str, user_id: str):
+    """
+    Store information about sent news article to prevent duplicates
+    """
+    try:
+        # Generate a unique ID for the article
+        article_id = article.get('article_id', '')
+        if not article_id:
+            url = article.get('link', article.get('url', ''))
+            title = article.get('title', '')
+            if url:
+                article_id = hashlib.md5(url.encode()).hexdigest()[:16]
+            elif title:
+                article_id = hashlib.md5(title.encode()).hexdigest()[:16]
+            else:
+                article_id = hashlib.md5(str(datetime.now()).hexdigest().encode()).hexdigest()[:16]
+        
+        # Prepare article data for storage
+        article_data = {
+            'article_id': article_id,
+            'title': article.get('title', '')[:255],  # Limit title length
+            'url': article.get('link', article.get('url', ''))[:500],  # Limit URL length
+            'source_name': article.get('source', article.get('source_name', ''))[:100],  # Limit source name
+            'pub_date': article.get('pubDate', article.get('published_at', ''))[:50],  # Limit date string
+            'stock_query': company_name,
+            'sent_to_users': [user_id],  # Store as array
+        }
+        
+        # Insert into database
+        user_client.table('processed_news_articles').insert(article_data).execute()
+        
+    except Exception as e:
+        if os.environ.get('BSE_VERBOSE', '0') == '1':
+            print(f"Error storing sent news article: {e}")
+
 class EnhancedNewsMonitor:
     """Enhanced news monitoring with user feedback improvements"""
     
@@ -42,10 +113,10 @@ class EnhancedNewsMonitor:
         self.ai_api_key = os.environ.get('GOOGLE_API_KEY')
         self.newsdata_api_key = os.environ.get('NEWSDATA_API_KEY')
         
-    def is_today_news(self, pub_date_str: str) -> bool:
-        """Check if article is from today"""
+    def is_recent_news(self, pub_date_str: str) -> bool:
+        """Check if article is recent (within last 48 hours)"""
         if not pub_date_str:
-            return False
+            return False  # Exclude articles without dates
             
         try:
             # Parse various date formats
@@ -54,19 +125,51 @@ class EnhancedNewsMonitor:
                 '%a, %d %b %Y %H:%M:%S GMT',
                 '%Y-%m-%dT%H:%M:%SZ',
                 '%Y-%m-%d %H:%M:%S',
-                '%Y-%m-%dT%H:%M:%S.%fZ'
+                '%Y-%m-%dT%H:%M:%S.%fZ',
+                '%Y-%m-%d'
             ]
             
             for fmt in formats:
                 try:
                     dt = datetime.strptime(pub_date_str.strip(), fmt)
-                    return dt.date() == self.today
+                    # Check if it's within the last 48 hours
+                    time_diff = datetime.now() - dt
+                    return time_diff.total_seconds() <= 48 * 3600  # 48 hours
                 except ValueError:
                     continue
                     
-            return False
+            return False  # Exclude articles with parsing errors
         except Exception:
-            return False
+            return False  # Exclude articles with any other errors
+    
+    def is_today_news(self, pub_date_str: str) -> bool:
+        """Check if article is from today or recent hours (to include fresh news)"""
+        if not pub_date_str:
+            return False  # Exclude articles without dates
+            
+        try:
+            # Parse various date formats
+            formats = [
+                '%a, %d %b %Y %H:%M:%S %z',
+                '%a, %d %b %Y %H:%M:%S GMT',
+                '%Y-%m-%dT%H:%M:%SZ',
+                '%Y-%m-%d %H:%M:%S',
+                '%Y-%m-%dT%H:%M:%S.%fZ',
+                '%Y-%m-%d'
+            ]
+            
+            for fmt in formats:
+                try:
+                    dt = datetime.strptime(pub_date_str.strip(), fmt)
+                    # Check if it's within the last 24 hours
+                    time_diff = datetime.now() - dt
+                    return time_diff.total_seconds() <= 24 * 3600  # 24 hours
+                except ValueError:
+                    continue
+                    
+            return False  # Exclude articles with parsing errors
+        except Exception:
+            return False  # Exclude articles with any other errors
     
     def generate_ai_summary(self, articles: List[Dict], company_name: str) -> str:
         """Generate AI-powered crisp summary of today's news"""
@@ -101,7 +204,7 @@ Requirements:
 Format: Brief, factual summary suitable for Telegram alert.
 """
             
-            # Call Gemini API
+            # Call Gemini API with proper SSL verification
             response = requests.post(
                 f'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={self.ai_api_key}',
                 headers={'Content-Type': 'application/json'},
@@ -110,7 +213,8 @@ Format: Brief, factual summary suitable for Telegram alert.
                         'parts': [{'text': prompt}]
                     }]
                 },
-                timeout=15
+                timeout=15,
+                verify=True  # Enable SSL verification
             )
             
             if response.status_code == 200:
@@ -173,6 +277,7 @@ Format: Brief, factual summary suitable for Telegram alert.
                     today_articles = []
                     for article in rss_articles:
                         pub_date = article.get('pubDate', article.get('published_at', ''))
+                        # Only include today's articles
                         if self.is_today_news(pub_date):
                             article['source_type'] = 'rss'
                             today_articles.append(article)
@@ -188,7 +293,7 @@ Format: Brief, factual summary suitable for Telegram alert.
                     print(f"NEWS: RSS fetch error: {e}")
         
         # 2. Fetch from NewsData.io API (backup, also filter for today)
-        if self.newsdata_api_key and len(all_articles) < 3:  # Only if we need more articles
+        if self.newsdata_api_key and len(all_articles) < 5:  # Only if we need more articles
             try:
                 # Use today's date for API search
                 today_str = self.today.strftime('%Y-%m-%d')
@@ -206,14 +311,15 @@ Format: Brief, factual summary suitable for Telegram alert.
                     'https://newsdata.io/api/1/news',
                     params=params,
                     headers={'X-ACCESS-KEY': self.newsdata_api_key},
-                    timeout=15
+                    timeout=15,
+                    verify=True  # Enable SSL verification
                 )
                 
                 if response.status_code == 200:
                     data = response.json()
                     api_articles = data.get('results', [])
                     
-                    # Double-check date filtering
+                    # Filter for today's articles only
                     today_api_articles = []
                     for article in api_articles:
                         pub_date = article.get('pubDate', '')
@@ -259,6 +365,120 @@ Format: Brief, factual summary suitable for Telegram alert.
             'fetch_timestamp': datetime.now().isoformat()
         }
     
+    def fetch_recent_news(self, company_name: str) -> Dict:
+        """Fetch and filter recent news (last 48 hours)"""
+        all_articles = []
+        data_sources = []
+        
+        if os.environ.get('BSE_VERBOSE', '0') == '1':
+            print(f"NEWS: Fetching recent news for {company_name}")
+        
+        # 1. Fetch from RSS feeds (real-time)
+        if RSS_AVAILABLE:
+            try:
+                rss_fetcher = RSSNewsFetcher()
+                rss_result = rss_fetcher.fetch_comprehensive_rss_news(company_name)
+                
+                if rss_result.get('success'):
+                    rss_articles = rss_result.get('articles', [])
+                    
+                    # Filter for recent articles only
+                    recent_articles = []
+                    for article in rss_articles:
+                        pub_date = article.get('pubDate', article.get('published_at', ''))
+                        # Only include recent articles
+                        if self.is_recent_news(pub_date):
+                            article['source_type'] = 'rss'
+                            recent_articles.append(article)
+                    
+                    all_articles.extend(recent_articles)
+                    data_sources.append(f"RSS Feeds ({len(recent_articles)} recent)")
+                    
+                    if os.environ.get('BSE_VERBOSE', '0') == '1':
+                        print(f"NEWS: RSS found {len(recent_articles)} recent articles (filtered from {len(rss_articles)} total)")
+                        
+            except Exception as e:
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"NEWS: RSS fetch error: {e}")
+        
+        # 2. Fetch from NewsData.io API (backup, also filter for recent)
+        if self.newsdata_api_key and len(all_articles) < 10:  # Only if we need more articles
+            try:
+                # Use recent date for API search (last 2 days)
+                from_date = (self.today - timedelta(days=2)).strftime('%Y-%m-%d')
+                
+                params = {
+                    'q': f'"{company_name}"',
+                    'language': 'en',
+                    'country': 'in',
+                    'category': 'business',
+                    'size': 10,
+                    'from_date': from_date  # Recent news
+                }
+                
+                response = requests.get(
+                    'https://newsdata.io/api/1/news',
+                    params=params,
+                    headers={'X-ACCESS-KEY': self.newsdata_api_key},
+                    timeout=15,
+                    verify=True  # Enable SSL verification
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    api_articles = data.get('results', [])
+                    
+                    # Filter for recent articles only
+                    recent_api_articles = []
+                    for article in api_articles:
+                        pub_date = article.get('pubDate', '')
+                        if self.is_recent_news(pub_date):
+                            article['source_type'] = 'api'
+                            recent_api_articles.append(article)
+                    
+                    all_articles.extend(recent_api_articles)
+                    data_sources.append(f"NewsData API ({len(recent_api_articles)} recent)")
+                    
+                    if os.environ.get('BSE_VERBOSE', '0') == '1':
+                        print(f"NEWS: API found {len(recent_api_articles)} recent articles")
+                        
+            except Exception as e:
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"NEWS: API fetch error: {e}")
+        
+        # 3. AI Deduplication (if available)
+        unique_articles = all_articles
+        dedup_stats = {'method': 'none', 'original_count': len(all_articles), 'deduplicated_count': len(all_articles)}
+        
+        if AI_DEDUPLICATION_AVAILABLE and len(all_articles) >= 3:
+            try:
+                dedup_result = ai_deduplicate_news_articles(all_articles)
+                unique_articles = dedup_result.get('deduplicated_articles', all_articles)
+                dedup_stats = dedup_result.get('stats', dedup_stats)
+                
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"NEWS: AI deduplication: {len(all_articles)} → {len(unique_articles)} articles")
+                    
+            except Exception as e:
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"NEWS: AI deduplication failed: {e}")
+        
+        return {
+            'success': len(unique_articles) > 0,
+            'articles': unique_articles,
+            'total_articles': len(unique_articles),
+            'data_sources': data_sources,
+            'deduplication_stats': dedup_stats,
+            'company_name': company_name,
+            'date_filter': 'recent_48_hours',
+            'fetch_timestamp': datetime.now().isoformat()
+        }
+    
+    def _get_source_summary(self, articles: List[Dict]) -> str:
+        """Get a summary of sources for the articles"""
+        sources = set(article.get('source', 'Unknown') for article in articles)
+        return ', '.join(sorted(sources)) if sources else 'Unknown sources'
+    
     def format_crisp_telegram_message(self, company_name: str, articles: List[Dict], ai_summary: str, dedup_stats: Dict = None) -> str:
         """Format crisp Telegram message without URLs"""
         if not articles:
@@ -298,217 +518,100 @@ Format: Brief, factual summary suitable for Telegram alert.
                 message += f"{i}. {title} ({source})\n"
         else:
             # Just show count and sources for many articles
-            sources = list(set([article.get('source', 'Unknown') for article in articles]))
-            message += f"📋 Sources: {', '.join(sources[:3])}"
-            if len(sources) > 3:
-                message += f" +{len(sources)-3} more"
-            message += "\n"
+            message += f"📋 {len(articles)} articles from various sources"
         
-        # Footer
-        message += "\n💡 Use Sentiment Analysis in app for detailed market impact!"
-        
-        return message
-    
-    def _get_source_summary(self, articles: List[Dict]) -> str:
-        """Get brief summary of news sources"""
-        sources = [article.get('source', 'Unknown') for article in articles]
-        unique_sources = list(set(sources))
-        
-        if len(unique_sources) == 1:
-            return unique_sources[0]
-        elif len(unique_sources) <= 3:
-            return ', '.join(unique_sources)
-        else:
-            return f"{unique_sources[0]}, {unique_sources[1]} +{len(unique_sources)-2} more"
+        return message.strip()
 
-def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips: List[Dict], telegram_recipients: List[Dict]) -> int:
-    """
-    Enhanced news alerts function - replacement for existing news monitoring
-    Focuses on today's news with crisp summaries
-    """
+def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, telegram_recipients) -> int:
+    """Send enhanced news alerts to Telegram recipients"""
     messages_sent = 0
-    monitor = EnhancedNewsMonitor()
     
-    if os.environ.get('BSE_VERBOSE', '0') == '1':
-        print(f"NEWS: Starting enhanced today-only news monitoring for user {user_id}")
-    
-    for scrip in monitored_scrips:
-        company_name = scrip.get('company_name', '')
-        bse_code = scrip.get('bse_code', '')
+    try:
+        if os.environ.get('BSE_VERBOSE', '0') == '1':
+            print(f"NEWS: Starting enhanced news alerts for user {user_id}")
         
-        if not company_name:
-            continue
+        # Create news monitor instance
+        news_monitor = EnhancedNewsMonitor()
         
-        try:
-            # Fetch today's news only
-            news_result = monitor.fetch_today_news_only(company_name)
+        # Process each monitored scrip
+        for scrip in monitored_scrips:
+            company_name = scrip.get('company_name', '')
+            bse_code = scrip.get('bse_code', '')
             
-            if not news_result.get('success') or not news_result.get('articles'):
+            if not company_name:
+                continue
+                
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"NEWS: Processing {company_name} ({bse_code})")
+            
+            # Fetch today's news for this company
+            news_result = news_monitor.fetch_today_news_only(company_name)
+            
+            if not news_result.get('success'):
                 if os.environ.get('BSE_VERBOSE', '0') == '1':
-                    print(f"NEWS: No news today for {company_name}")
+                    print(f"NEWS: No news for {company_name} today")
                 continue
             
             articles = news_result.get('articles', [])
-            dedup_stats = news_result.get('deduplication_stats', {})
+            if not articles:
+                continue
             
-            # Filter out already sent articles (check against database)
+            # Filter out articles that have already been sent
             new_articles = []
             for article in articles:
-                if not check_news_already_sent_today(user_client, article, company_name):
+                if not check_news_already_sent(user_client, article, company_name):
                     new_articles.append(article)
+                else:
+                    if os.environ.get('BSE_VERBOSE', '0') == '1':
+                        title = article.get('title', 'Unknown')[:50]
+                        print(f"NEWS: Skipping already sent article: {title}")
             
             if not new_articles:
                 if os.environ.get('BSE_VERBOSE', '0') == '1':
-                    print(f"NEWS: No new articles today for {company_name}")
+                    print(f"NEWS: No new articles for {company_name}")
                 continue
             
-            # Generate AI summary
-            ai_summary = monitor.generate_ai_summary(new_articles, company_name)
+            # Generate AI summary for new articles only
+            ai_summary = news_monitor.generate_ai_summary(new_articles, company_name)
             
-            # Format crisp message
-            message = monitor.format_crisp_telegram_message(company_name, new_articles, ai_summary, dedup_stats)
+            # Format Telegram message
+            telegram_message = news_monitor.format_crisp_telegram_message(
+                company_name, 
+                new_articles, 
+                ai_summary,
+                news_result.get('deduplication_stats')
+            )
             
-            # Send to Telegram recipients
+            # Send to all recipients
             for recipient in telegram_recipients:
                 chat_id = recipient['chat_id']
+                user_name = recipient.get('user_name', 'User')
+                
+                # Add user name header
+                personalized_message = f"👤 {user_name}\n" + "─" * 20 + "\n" + telegram_message
+                
                 try:
-                    telegram_api_url = f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}"
-                    response = requests.post(
-                        f"{telegram_api_url}/sendMessage",
-                        json={
-                            'chat_id': chat_id,
-                            'text': message,
-                            'parse_mode': 'HTML',
-                            'disable_web_page_preview': True  # No URL previews for clean look
-                        },
-                        timeout=10
-                    )
-                    
-                    if response.status_code == 200:
+                    from database import send_telegram_message_with_user_name
+                    if send_telegram_message_with_user_name(chat_id, personalized_message, user_name):
                         messages_sent += 1
                         if os.environ.get('BSE_VERBOSE', '0') == '1':
-                            print(f"NEWS: Sent enhanced crisp alert for {company_name} to {chat_id}")
+                            print(f"NEWS: Sent alert to {user_name}")
                     else:
-                        # Parse Telegram API error
-                        try:
-                            error_data = response.json()
-                            error_code = error_data.get('error_code', 'unknown')
-                            error_desc = error_data.get('description', 'unknown')
-                            
-                            if error_code == 400 and 'chat not found' in error_desc.lower():
-                                print(f"NEWS: Chat {chat_id} not found - user may have blocked bot or deleted chat")
-                                # TODO: Mark this recipient as inactive in database
-                            elif error_code == 403 and 'bot was blocked' in error_desc.lower():
-                                print(f"NEWS: Bot was blocked by user {chat_id}")
-                                # TODO: Mark this recipient as inactive in database  
-                            else:
-                                print(f"NEWS: Telegram API error for {chat_id}: {error_desc} (code: {error_code})")
-                        except:
-                            print(f"NEWS: Telegram API error for {chat_id}: {response.text}")
-                        
-                except Exception as send_error:
-                    print(f"NEWS: Error sending to {chat_id}: {send_error}")
+                        print(f"NEWS: Failed to send alert to {user_name}")
+                except Exception as e:
+                    print(f"NEWS: Error sending to {user_name}: {e}")
             
-            # Store articles for future reference
+            # Store the sent articles to prevent duplicates in future
             for article in new_articles:
-                store_news_article_enhanced(user_client, article, company_name, [user_id])
-            
-        except Exception as e:
-            print(f"NEWS: Error processing {company_name}: {e}")
-            continue
-    
-    if os.environ.get('BSE_VERBOSE', '0') == '1':
-        print(f"NEWS: Enhanced monitoring complete for user {user_id}, sent {messages_sent} crisp alerts")
-    
-    return messages_sent
-
-def check_news_already_sent_today(user_client, article: Dict, company_name: str) -> bool:
-    """Check if this article was already sent today"""
-    try:
-        article_id = article.get('article_id', article.get('link', ''))
-        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        response = user_client.table('processed_news_articles').select('article_id').eq('article_id', article_id).gte('created_at', today_start.isoformat()).execute()
-        
-        return len(response.data) > 0
-    except Exception:
-        return False
-
-def store_news_article_enhanced(user_client, article: Dict, company_name: str, user_ids: List[str]):
-    """Store article with enhanced tracking - BULLETPROOF database-safe version"""
-    try:
-        # DEFENSIVE APPROACH: Extract fields safely and create completely clean data structure
-        # This prevents ANY problematic fields from reaching the database
-        
-        # Extract article ID safely
-        article_id = ''
-        if article.get('article_id'):
-            article_id = str(article.get('article_id', ''))
-        elif article.get('link'):
-            article_id = str(article.get('link', ''))
-        elif article.get('url'):
-            article_id = str(article.get('url', ''))
-        else:
-            # Generate a unique ID if none available
-            import hashlib
-            import time
-            article_id = hashlib.md5(f"{company_name}_{time.time()}".encode()).hexdigest()[:16]
-        
-        # Extract other fields safely
-        title = str(article.get('title', '') or '').strip()
-        description = str(article.get('description', '') or '').strip()
-        
-        # Get URL - try multiple possible field names
-        url = ''
-        if article.get('url'):
-            url = str(article.get('url', ''))
-        elif article.get('link'):
-            url = str(article.get('link', ''))
-        
-        # Get source name safely
-        source_name = str(article.get('source', article.get('source_name', 'Unknown')) or 'Unknown').strip()
-        
-        # Get publication date safely
-        pub_date = str(article.get('pubDate', article.get('published_at', '')) or '').strip()
-        
-        # Get source type safely (optional)
-        source_type = str(article.get('source_type', '') or '').strip()
-        
-        # Create ONLY the fields that exist in database - HARDCODED list for safety
-        safe_article_data = {
-            'article_id': article_id,
-            'title': title,
-            'description': description,
-            'url': url,
-            'source_name': source_name,
-            'pub_date': pub_date,
-            'stock_query': str(company_name or '').strip(),
-            'sent_to_users': user_ids or []
-        }
-        
-        # Add source_type only if it has a value
-        if source_type:
-            safe_article_data['source_type'] = source_type
-        
-        # DATABASE INSERT - using only safe fields
-        user_client.table('processed_news_articles').insert(safe_article_data).execute()
+                store_sent_news_article(user_client, article, company_name, user_id)
         
         if os.environ.get('BSE_VERBOSE', '0') == '1':
-            print(f"NEWS: Stored article {article_id[:12]}... for {company_name}")
+            print(f"NEWS: Enhanced alerts completed. Messages sent: {messages_sent}")
             
     except Exception as e:
-        # Enhanced error logging with field information
-        error_msg = str(e)
-        if 'column' in error_msg and 'schema cache' in error_msg:
-            print(f"NEWS: Database schema error - article storage skipped: {error_msg}")
-            print(f"NEWS: This should NOT happen anymore - please report this error")
-        elif 'PGRST204' in error_msg:
-            print(f"NEWS: PostgREST schema error - article storage skipped: {error_msg}")
-            print(f"NEWS: This indicates a remaining schema mismatch")
-        else:
-            print(f"NEWS: Article storage error: {e}")
-
-# For compatibility with existing system
-def send_news_alerts_enhanced(user_client, user_id: str, monitored_scrips: List[Dict], telegram_recipients: List[Dict]) -> int:
-    """Wrapper function for enhanced news alerts"""
-    return enhanced_send_news_alerts(user_client, user_id, monitored_scrips, telegram_recipients)
+        print(f"NEWS: Error in enhanced_send_news_alerts: {e}")
+        if os.environ.get('BSE_VERBOSE', '0') == '1':
+            import traceback
+            traceback.print_exc()
+    
+    return messages_sent
