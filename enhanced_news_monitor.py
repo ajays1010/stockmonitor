@@ -158,18 +158,49 @@ class EnhancedNewsMonitor:
                 '%Y-%m-%d'
             ]
             
+            dt_parsed = None
             for fmt in formats:
                 try:
-                    dt = datetime.strptime(pub_date_str.strip(), fmt)
-                    # Check if it's within the last 24 hours
-                    time_diff = datetime.now() - dt
-                    return time_diff.total_seconds() <= 24 * 3600  # 24 hours
+                    dt_parsed = datetime.strptime(pub_date_str.strip(), fmt)
+                    break
                 except ValueError:
                     continue
+            
+            if dt_parsed is None:
+                # Try more lenient parsing as fallback
+                try:
+                    from dateutil import parser
+                    dt_parsed = parser.parse(pub_date_str)
+                except:
+                    return False
+            
+            # Handle timezone-aware vs naive datetime comparison
+            now = datetime.now()
+            if dt_parsed.tzinfo is not None:
+                # Article has timezone info, convert to UTC for comparison
+                if now.tzinfo is None:
+                    # Make now timezone-aware (assume local time)
+                    import pytz
+                    local_tz = pytz.timezone('Asia/Kolkata')  # IST
+                    now = local_tz.localize(now)
+                dt_parsed = dt_parsed.astimezone(now.tzinfo)
+            else:
+                # Both are naive, assume same timezone
+                pass
+            
+            # Check if it's within the last 30 hours (more lenient for news)
+            time_diff = now - dt_parsed
+            is_recent = time_diff.total_seconds() <= 30 * 3600  # 30 hours
+            
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"NEWS: Date check - Article: {pub_date_str} -> {dt_parsed}, Now: {now}, Diff: {time_diff.total_seconds()/3600:.1f}h, Recent: {is_recent}")
+            
+            return is_recent
                     
+        except Exception as e:
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"NEWS: Date parsing error for '{pub_date_str}': {e}")
             return False  # Exclude articles with parsing errors
-        except Exception:
-            return False  # Exclude articles with any other errors
     
     def generate_ai_summary(self, articles: List[Dict], company_name: str) -> str:
         """Generate AI-powered crisp summary of today's news"""
