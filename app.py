@@ -320,7 +320,7 @@ def cron_master():
         # - Haven't run it today already
         should_run_summary = (
             is_working_day and 
-            time_diff <= 10 and 
+            time_diff <= 5 and 
             now_ist >= summary_time_target.replace(minute=25)  # After 16:25
         )
         
@@ -334,7 +334,7 @@ def cron_master():
                     from datetime import datetime
                     for run in existing_runs.data:
                         run_time = datetime.fromisoformat(run['created_at'].replace('Z', '+00:00'))
-                        if (now_ist - run_time).total_seconds() < 7200:  # 2 hours
+                        if (now_ist - run_time).total_seconds() < 1800:  # 2 hours
                             results['skipped_jobs'].append({
                                 'name': 'daily_summary',
                                 'reason': 'Already executed today (recent run detected)'
@@ -1306,4 +1306,5 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', os.environ.get('FLASK_RUN_PORT', 5000)))
     debug = os.environ.get('FLASK_DEBUG', '0') == '1'
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
