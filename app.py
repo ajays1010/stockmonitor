@@ -325,16 +325,24 @@ def cron_master():
         )
         
         if should_run_summary:
-            # Check if already run today
+            # Check if already run today with a more robust check
             today_start = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
             try:
                 existing_runs = sb.table('cron_run_logs').select('created_at').eq('job', 'daily_summary').gte('created_at', today_start.isoformat()).execute()
                 if existing_runs.data:
-                    results['skipped_jobs'].append({
-                        'name': 'daily_summary',
-                        'reason': 'Already executed today'
-                    })
-                else:
+                    # Check if any run was within the last 2 hours (prevent duplicates within same window)
+                    from datetime import datetime
+                    for run in existing_runs.data:
+                        run_time = datetime.fromisoformat(run['created_at'].replace('Z', '+00:00'))
+                        if (now_ist - run_time).total_seconds() < 7200:  # 2 hours
+                            results['skipped_jobs'].append({
+                                'name': 'daily_summary',
+                                'reason': 'Already executed today (recent run detected)'
+                            })
+                            should_run_summary = False
+                            break
+                
+                if should_run_summary:  # Still should run
                     jobs_to_run.append({
                         'name': 'daily_summary',
                         'condition': True,
@@ -1298,3 +1306,4 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', os.environ.get('FLASK_RUN_PORT', 5000)))
     debug = os.environ.get('FLASK_DEBUG', '0') == '1'
     app.run(host='0.0.0.0', port=port, debug=debug)
+
