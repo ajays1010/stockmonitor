@@ -31,8 +31,8 @@ class RSSNewsFetcher:
             'moneycontrol': 'https://www.moneycontrol.com/rss/business.xml',
             'financial_express': 'https://www.financialexpress.com/market/rss/',
             'livemint': 'https://www.livemint.com/rss/markets',
-            'zeebiz': 'https://www.zeebiz.com/market/rss',
-            'cnbctv18': 'https://www.cnbctv18.com/market/rss.xml'  # Added more reliable source
+            'zeebiz': 'https://www.zeebiz.com/market/rss'
+          #  'cnbctv18': 'https://www.cnbctv18.com/market/rss.xml'  # Added more reliable source
         }
         
         # Updated headers to avoid blocking
@@ -527,4 +527,5 @@ if __name__ == "__main__":
                 source = article.get('source', 'Unknown')
                 print(f"  {i}. {title}... (Source: {source})")
     else:
+
         print("❌ No articles found")
