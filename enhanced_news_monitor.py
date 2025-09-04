@@ -114,36 +114,7 @@ class EnhancedNewsMonitor:
         self.newsdata_api_key = os.environ.get('NEWSDATA_API_KEY')
         
     def is_recent_news(self, pub_date_str: str) -> bool:
-        """Check if article is recent (within last 48 hours)"""
-        if not pub_date_str:
-            return False  # Exclude articles without dates
-            
-        try:
-            # Parse various date formats
-            formats = [
-                '%a, %d %b %Y %H:%M:%S %z',
-                '%a, %d %b %Y %H:%M:%S GMT',
-                '%Y-%m-%dT%H:%M:%SZ',
-                '%Y-%m-%d %H:%M:%S',
-                '%Y-%m-%dT%H:%M:%S.%fZ',
-                '%Y-%m-%d'
-            ]
-            
-            for fmt in formats:
-                try:
-                    dt = datetime.strptime(pub_date_str.strip(), fmt)
-                    # Check if it's within the last 48 hours
-                    time_diff = datetime.now() - dt
-                    return time_diff.total_seconds() <= 48 * 3600  # 48 hours
-                except ValueError:
-                    continue
-                    
-            return False  # Exclude articles with parsing errors
-        except Exception:
-            return False  # Exclude articles with any other errors
-    
-    def is_today_news(self, pub_date_str: str) -> bool:
-        """Check if article is from today or recent hours (to include fresh news)"""
+        """Check if article is from recent days (rely on database duplicate checking for exact timing)"""
         if not pub_date_str:
             return False  # Exclude articles without dates
             
@@ -188,14 +159,75 @@ class EnhancedNewsMonitor:
                 # Both are naive, assume same timezone
                 pass
             
-            # Check if it's within the last 30 hours (more lenient for news)
+            # Check if it's within the last 2 days (let database handle duplicate prevention)
             time_diff = now - dt_parsed
-            is_recent = time_diff.total_seconds() <= 30 * 3600  # 30 hours
+            is_recent = time_diff.total_seconds() <= 2 * 24 * 3600  # 2 days
             
             if os.environ.get('BSE_VERBOSE', '0') == '1':
-                print(f"NEWS: Date check - Article: {pub_date_str} -> {dt_parsed}, Now: {now}, Diff: {time_diff.total_seconds()/3600:.1f}h, Recent: {is_recent}")
+                print(f"NEWS: Recent check - Article: {pub_date_str} -> {dt_parsed.date()}, Age: {time_diff.total_seconds()/3600:.1f}h, Recent: {is_recent}")
             
             return is_recent
+                    
+        except Exception as e:
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"NEWS: Recent date parsing error for '{pub_date_str}': {e}")
+            return False  # Exclude articles with parsing errors
+    
+    def is_today_news(self, pub_date_str: str) -> bool:
+        """Check if article is from today (rely on database duplicate checking for timing)"""
+        if not pub_date_str:
+            return False  # Exclude articles without dates
+            
+        try:
+            # Parse various date formats
+            formats = [
+                '%a, %d %b %Y %H:%M:%S %z',
+                '%a, %d %b %Y %H:%M:%S GMT',
+                '%Y-%m-%dT%H:%M:%SZ',
+                '%Y-%m-%d %H:%M:%S',
+                '%Y-%m-%dT%H:%M:%S.%fZ',
+                '%Y-%m-%d'
+            ]
+            
+            dt_parsed = None
+            for fmt in formats:
+                try:
+                    dt_parsed = datetime.strptime(pub_date_str.strip(), fmt)
+                    break
+                except ValueError:
+                    continue
+            
+            if dt_parsed is None:
+                # Try more lenient parsing as fallback
+                try:
+                    from dateutil import parser
+                    dt_parsed = parser.parse(pub_date_str)
+                except:
+                    return False
+            
+            # Handle timezone-aware vs naive datetime comparison
+            now = datetime.now()
+            if dt_parsed.tzinfo is not None:
+                # Article has timezone info, convert to UTC for comparison
+                if now.tzinfo is None:
+                    # Make now timezone-aware (assume local time)
+                    import pytz
+                    local_tz = pytz.timezone('Asia/Kolkata')  # IST
+                    now = local_tz.localize(now)
+                dt_parsed = dt_parsed.astimezone(now.tzinfo)
+            else:
+                # Both are naive, assume same timezone
+                pass
+            
+            # Check if it's from today (let database handle duplicate prevention)
+            today = now.date()
+            article_date = dt_parsed.date()
+            is_today = article_date == today
+            
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"NEWS: Date check - Article: {pub_date_str} -> {dt_parsed.date()}, Today: {today}, Is Today: {is_today}")
+            
+            return is_today
                     
         except Exception as e:
             if os.environ.get('BSE_VERBOSE', '0') == '1':
