@@ -53,8 +53,8 @@ def check_news_already_sent(user_client, article: Dict, company_name: str) -> bo
             else:
                 article_id = hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:16]
         
-        # Check if this article has been processed for this company in the last 7 days
-        cutoff_date = datetime.now() - timedelta(days=7)
+        # Check if this article has been processed for this company in the last 24 hours (shorter window)
+        cutoff_date = datetime.now() - timedelta(hours=24)
         
         # First check by article_id and company
         result = user_client.table('processed_news_articles')\
@@ -863,6 +863,7 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
     messages_sent = 0
     
     try:
+        print(f"🔥 ENHANCED_NEWS_MONITOR: Starting NEW format alerts for user {user_id}")
         if os.environ.get('BSE_VERBOSE', '0') == '1':
             print(f"NEWS: Starting enhanced news alerts for user {user_id}")
         
@@ -910,7 +911,10 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
             # Generate AI summary for new articles only
             ai_summary = news_monitor.generate_ai_summary(new_articles, company_name)
             
-            # Format Telegram message
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"NEWS: Generated AI summary: {ai_summary[:100]}...")
+            
+            # Format Telegram message using NEW format
             telegram_message = news_monitor.format_crisp_telegram_message(
                 company_name, 
                 new_articles, 
@@ -918,13 +922,16 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
                 news_result.get('deduplication_stats')
             )
             
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"NEWS: Formatted message preview: {telegram_message[:200]}...")
+            
             # Send to all recipients
             for recipient in telegram_recipients:
                 chat_id = recipient['chat_id']
                 user_name = recipient.get('user_name', 'User')
                 
-                # Add user name header
-                personalized_message = f"👤 {user_name}\n" + "─" * 20 + "\n" + telegram_message
+                # Add user name header with NEW FORMAT identifier
+                personalized_message = f"👤 {user_name}\n" + "─" * 20 + "\n🆕 NEW FORMAT\n" + telegram_message
                 
                 try:
                     from database import send_telegram_message_with_user_name
