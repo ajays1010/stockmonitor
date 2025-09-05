@@ -18,6 +18,8 @@ gunicorn==21.2.0
 google-generativeai
 PyPDF2
 feedparser>=6.0.10
+pytz>=2023.3
+python-dateutil>=2.8.2
 
 # AI/PDF Analysis Dependencies
 google-generativeai>=0.3.0
@@ -26,4 +28,5 @@ pdfplumber>=0.9.0
 Pillow>=9.0.0
 
 # Additional PDF Processing
+
 pdf2image>=1.16.0
