@@ -863,7 +863,10 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
     messages_sent = 0
     
     try:
-        print(f"🔥 ENHANCED_NEWS_MONITOR: Starting NEW format alerts for user {user_id}")
+        # FORCE LOGGING TO IDENTIFY WHICH SYSTEM IS RUNNING
+        print(f"🔥🔥🔥 ENHANCED_NEWS_MONITOR v2.0: NEW SYSTEM RUNNING FOR USER {user_id} 🔥🔥🔥")
+        print(f"🔥🔥🔥 THIS IS THE NEW FORMAT SYSTEM - NOT THE OLD ONE 🔥🔥🔥")
+        print(f"🔥🔥🔥 TIMESTAMP: {datetime.now().isoformat()} 🔥🔥🔥")
         if os.environ.get('BSE_VERBOSE', '0') == '1':
             print(f"NEWS: Starting enhanced news alerts for user {user_id}")
         
