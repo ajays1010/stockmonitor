@@ -421,7 +421,7 @@ def cron_master():
                             sent = send_bulk_deals_alerts(sb, uid, scrips, recipients)
                         elif job_name == 'news_monitoring':
                             # Import and use ENHANCED news monitoring (crisp summaries, today's news only)
-                            from enhanced_news_monitor import enhanced_send_news_alerts
+                            from updated_enhanced_news_monitor import enhanced_send_news_alerts
                             sent = enhanced_send_news_alerts(sb, uid, scrips, recipients)
                         else:
                             continue
@@ -1306,5 +1306,6 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', os.environ.get('FLASK_RUN_PORT', 5000)))
     debug = os.environ.get('FLASK_DEBUG', '0') == '1'
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
 
