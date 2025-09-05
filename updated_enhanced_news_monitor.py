@@ -53,8 +53,8 @@ def check_news_already_sent(user_client, article: Dict, company_name: str) -> bo
             else:
                 article_id = hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:16]
         
-        # Check if this article has been processed for this company in the last 24 hours (shorter window)
-        cutoff_date = datetime.now() - timedelta(hours=24)
+        # Check if this article has been processed for this company in the last 48 hours (longer window for better duplicate detection)
+        cutoff_date = datetime.now() - timedelta(hours=48)
         
         # First check by article_id and company
         result = user_client.table('processed_news_articles')\
@@ -132,19 +132,37 @@ def store_sent_news_article(user_client, article: Dict, company_name: str, user_
             else:
                 article_id = hashlib.md5(str(datetime.now()).hexdigest().encode()).hexdigest()[:16]
         
-        # Prepare article data for storage
-        article_data = {
-            'article_id': article_id,
-            'title': article.get('title', '')[:255],  # Limit title length
-            'url': article.get('link', article.get('url', ''))[:500],  # Limit URL length
-            'source_name': article.get('source', article.get('source_name', ''))[:100],  # Limit source name
-            'pub_date': article.get('pubDate', article.get('published_at', ''))[:50],  # Limit date string
-            'stock_query': company_name,
-            'sent_to_users': [user_id],  # Store as array
-        }
+        # Check if article already exists and update sent_to_users
+        existing_result = user_client.table('processed_news_articles')\
+            .select('id, sent_to_users')\
+            .eq('article_id', article_id)\
+            .eq('stock_query', company_name)\
+            .execute()
         
-        # Insert into database
-        user_client.table('processed_news_articles').insert(article_data).execute()
+        if existing_result.data:
+            # Article exists, update sent_to_users array
+            existing_record = existing_result.data[0]
+            existing_users = existing_record.get('sent_to_users', [])
+            if user_id not in existing_users:
+                existing_users.append(user_id)
+                user_client.table('processed_news_articles')\
+                    .update({'sent_to_users': existing_users})\
+                    .eq('id', existing_record['id'])\
+                    .execute()
+        else:
+            # New article, create record
+            article_data = {
+                'article_id': article_id,
+                'title': article.get('title', '')[:255],  # Limit title length
+                'url': article.get('link', article.get('url', ''))[:500],  # Limit URL length
+                'source_name': article.get('source', article.get('source_name', ''))[:100],  # Limit source name
+                'pub_date': article.get('pubDate', article.get('published_at', ''))[:50],  # Limit date string
+                'stock_query': company_name,
+                'sent_to_users': [user_id],  # Store as array
+            }
+            
+            # Insert into database
+            user_client.table('processed_news_articles').insert(article_data).execute()
         
     except Exception as e:
         if os.environ.get('BSE_VERBOSE', '0') == '1':
@@ -582,6 +600,43 @@ class EnhancedNewsMonitor:
         except Exception:
             return False
     
+    def _check_user_already_received_article(self, user_client, article: Dict, company_name: str, user_id: str) -> bool:
+        """Check if this specific user has already received this article"""
+        try:
+            # Generate article ID
+            article_id = article.get('article_id', '')
+            if not article_id:
+                url = article.get('link', article.get('url', ''))
+                title = article.get('title', '')
+                if url:
+                    article_id = hashlib.md5(url.encode()).hexdigest()[:16]
+                elif title:
+                    article_id = hashlib.md5(title.encode()).hexdigest()[:16]
+                else:
+                    return False
+            
+            # Check if this user received this article in last 48 hours
+            cutoff_date = datetime.now() - timedelta(hours=48)
+            
+            result = user_client.table('processed_news_articles')\
+                .select('sent_to_users')\
+                .eq('article_id', article_id)\
+                .eq('stock_query', company_name)\
+                .gte('created_at', cutoff_date.isoformat())\
+                .execute()
+            
+            for record in result.data:
+                sent_users = record.get('sent_to_users', [])
+                if user_id in sent_users:
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"Error checking user article history: {e}")
+            return False
+    
     def generate_ai_summary(self, articles: List[Dict], company_name: str) -> str:
         """Generate AI-powered crisp summary of today's news"""
         if not self.ai_api_key or not articles:
@@ -972,6 +1027,18 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
     """Send enhanced news alerts to Telegram recipients"""
     messages_sent = 0
     
+    # RACE CONDITION PROTECTION: Check if already running for this user
+    import threading
+    if not hasattr(enhanced_send_news_alerts, '_running_users'):
+        enhanced_send_news_alerts._running_users = set()
+    
+    if user_id in enhanced_send_news_alerts._running_users:
+        print(f"🚫 NEWS MONITORING ALREADY RUNNING FOR USER {user_id} - SKIPPING TO PREVENT DUPLICATES")
+        return 0
+    
+    # Mark user as being processed
+    enhanced_send_news_alerts._running_users.add(user_id)
+    
     try:
         # FORCE LOGGING TO IDENTIFY WHICH SYSTEM IS RUNNING
         print(f"🔥🔥🔥 ENHANCED_NEWS_MONITOR v2.0: NEW SYSTEM RUNNING FOR USER {user_id} 🔥🔥🔥")
@@ -1006,11 +1073,18 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
             if not articles:
                 continue
             
-            # Filter out articles that have already been sent
+            # Filter out articles that have already been sent (IMPROVED DUPLICATE CHECK)
             new_articles = []
             for article in articles:
+                # Check both by article ID and by user_id + company combination
                 if not check_news_already_sent(user_client, article, company_name):
-                    new_articles.append(article)
+                    # Additional check: has this specific user received this article?
+                    if not self._check_user_already_received_article(user_client, article, company_name, user_id):
+                        new_articles.append(article)
+                    else:
+                        if os.environ.get('BSE_VERBOSE', '0') == '1':
+                            title = article.get('title', 'Unknown')[:50]
+                            print(f"NEWS: User already received this article: {title}")
                 else:
                     if os.environ.get('BSE_VERBOSE', '0') == '1':
                         title = article.get('title', 'Unknown')[:50]
@@ -1069,5 +1143,11 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
         if os.environ.get('BSE_VERBOSE', '0') == '1':
             import traceback
             traceback.print_exc()
+    finally:
+        # ALWAYS remove user from running set to prevent permanent blocking
+        if hasattr(enhanced_send_news_alerts, '_running_users'):
+            enhanced_send_news_alerts._running_users.discard(user_id)
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"NEWS: Removed user {user_id} from running set")
     
     return messages_sent
