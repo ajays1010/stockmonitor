@@ -53,22 +53,67 @@ def check_news_already_sent(user_client, article: Dict, company_name: str) -> bo
             else:
                 article_id = hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:16]
         
-        # Check if this article has been processed for this company in the last 48 hours
-        cutoff_date = datetime.now() - timedelta(hours=48)
+        # Check if this article has been processed for this company in the last 7 days
+        cutoff_date = datetime.now() - timedelta(days=7)
         
+        # First check by article_id and company
         result = user_client.table('processed_news_articles')\
-            .select('id')\
+            .select('id, created_at')\
             .eq('article_id', article_id)\
             .eq('stock_query', company_name)\
             .gte('created_at', cutoff_date.isoformat())\
             .execute()
         
-        return len(result.data) > 0
+        if len(result.data) > 0:
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"NEWS: Duplicate found by article_id: {article_id[:8]}... for {company_name}")
+            return True
+        
+        # Also check by title similarity (for cases where URL might be different)
+        title = article.get('title', '').strip()
+        if title and len(title) > 20:
+            # Check for similar titles in the last 3 days
+            title_cutoff = datetime.now() - timedelta(days=3)
+            
+            result = user_client.table('processed_news_articles')\
+                .select('id, title')\
+                .eq('stock_query', company_name)\
+                .gte('created_at', title_cutoff.isoformat())\
+                .execute()
+            
+            for record in result.data:
+                existing_title = record.get('title', '').strip()
+                if existing_title and len(existing_title) > 20:
+                    # Check for 80% similarity in titles
+                    similarity = _calculate_title_similarity(title, existing_title)
+                    if similarity > 0.8:
+                        if os.environ.get('BSE_VERBOSE', '0') == '1':
+                            print(f"NEWS: Duplicate found by title similarity ({similarity:.2f}): {title[:50]}...")
+                        return True
+        
+        return False
         
     except Exception as e:
         if os.environ.get('BSE_VERBOSE', '0') == '1':
             print(f"Error checking news duplication: {e}")
         return False  # If there's an error, assume it's a new article
+
+def _calculate_title_similarity(title1: str, title2: str) -> float:
+    """Calculate similarity between two titles"""
+    try:
+        # Simple word-based similarity
+        words1 = set(title1.lower().split())
+        words2 = set(title2.lower().split())
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        intersection = words1.intersection(words2)
+        union = words1.union(words2)
+        
+        return len(intersection) / len(union) if union else 0.0
+    except:
+        return 0.0
 
 def store_sent_news_article(user_client, article: Dict, company_name: str, user_id: str):
     """
@@ -112,6 +157,82 @@ class EnhancedNewsMonitor:
         self.today = datetime.now().date()
         self.ai_api_key = os.environ.get('GOOGLE_API_KEY')
         self.newsdata_api_key = os.environ.get('NEWSDATA_API_KEY')
+        
+        # Smart filtering keywords
+        self.relevance_keywords = {
+            'high_relevance': [
+                'earnings', 'results', 'profit', 'revenue', 'quarterly', 'annual',
+                'merger', 'acquisition', 'deal', 'partnership', 'agreement',
+                'launch', 'launches', 'expansion', 'investment', 'stake',
+                'ipo', 'listing', 'delisting', 'buyback', 'dividend',
+                'ceo', 'management', 'board', 'director', 'appointment',
+                'contract', 'order', 'tender', 'approval', 'license',
+                'rating', 'upgrade', 'downgrade', 'target price',
+                'shares', 'stock price', 'market cap', 'valuation'
+            ],
+            'medium_relevance': [
+                'business', 'company', 'firm', 'corporate', 'operations',
+                'growth', 'performance', 'strategy', 'plans', 'outlook',
+                'sector', 'industry', 'market share', 'competition'
+            ],
+            'low_relevance': [
+                'general', 'overall', 'economy', 'economic', 'market trends',
+                'global', 'worldwide', 'international', 'macro', 'policy'
+            ]
+        }
+        
+        # Irrelevant patterns to filter out
+        self.irrelevant_patterns = [
+            'market outlook', 'economic survey', 'gdp growth', 'inflation',
+            'interest rates', 'monetary policy', 'budget', 'government policy',
+            'general market', 'overall market', 'broad market', 'market sentiment',
+            'global economy', 'world economy', 'economic indicators',
+            'market analysis', 'market review', 'weekly wrap', 'daily wrap'
+        ]
+        
+        # Blacklist keywords for headlines (noise filters)
+        self.headline_blacklist = [
+            # Generic stock movement phrases
+            'stock rises', 'stock falls', 'shares up', 'shares down',
+            'stock gains', 'stock drops', 'shares gain', 'shares fall',
+            'stock jumps', 'stock tumbles', 'shares jump', 'shares tumble',
+            'stock surges', 'stock plunges', 'shares surge', 'shares plunge',
+            'stock climbs', 'stock slides', 'shares climb', 'shares slide',
+            
+            # Generic stock lists and recommendations
+            '15 stocks', '10 stocks', '5 stocks', '20 stocks', '12 stocks',
+            'top picks', 'hot stocks', 'best stocks', 'stocks to buy',
+            'stocks to watch', 'stocks to avoid', 'penny stocks',
+            'multibagger', 'multibagger stocks', 'wealth creators',
+            
+            # Technical analysis noise
+            'market volatility', 'technical analysis', 'chart pattern',
+            'support level', 'resistance level', 'moving average',
+            'fibonacci', 'bollinger bands', 'rsi', 'macd',
+            'breakout', 'breakdown', 'trend analysis',
+            
+            # Generic market commentary
+            'market wrap', 'market close', 'market open', 'market update',
+            'market buzz', 'market mood', 'market trends', 'market view',
+            'weekly roundup', 'daily roundup', 'market roundup',
+            'closing bell', 'opening bell', 'pre-market', 'after-market',
+            
+            # Generic recommendations and lists
+            'buy recommendation', 'sell recommendation', 'hold recommendation',
+            'analyst recommendation', 'broker recommendation',
+            'stock recommendations', 'investment ideas', 'trading ideas',
+            'portfolio picks', 'wealth picks', 'investment picks',
+            
+            # Sector-wide generic news
+            'sector outlook', 'sector analysis', 'sector review',
+            'industry outlook', 'industry analysis', 'industry trends',
+            'sectoral trends', 'sectoral analysis',
+            
+            # Generic financial terms
+            'market cap', 'pe ratio', 'price target', 'target price revised',
+            'fair value', 'intrinsic value', 'book value',
+            'dividend yield', 'earnings yield'
+        ]
         
     def is_recent_news(self, pub_date_str: str) -> bool:
         """Check if article is from recent days (rely on database duplicate checking for exact timing)"""
@@ -234,6 +355,127 @@ class EnhancedNewsMonitor:
                 print(f"NEWS: Date parsing error for '{pub_date_str}': {e}")
             return False  # Exclude articles with parsing errors
     
+    def is_relevant_news(self, article: Dict, company_name: str) -> bool:
+        """
+        Smart filtering to determine if news is relevant to the specific company
+        Returns True if relevant, False if too general/irrelevant
+        """
+        try:
+            title = article.get('title', '').lower()
+            description = article.get('description', '').lower()
+            content = f"{title} {description}"
+            
+            # STEP 1: Check headline blacklist (noise filters)
+            for blacklisted_phrase in self.headline_blacklist:
+                if blacklisted_phrase in title:
+                    if os.environ.get('BSE_VERBOSE', '0') == '1':
+                        print(f"NEWS: 🚫 BLACKLISTED - '{blacklisted_phrase}': {title[:50]}...")
+                    return False
+            
+            # STEP 2: Check if company name is prominently mentioned
+            company_mentions = self._count_company_mentions(content, company_name)
+            
+            # Filter out articles with very few company mentions
+            if company_mentions < 1:
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"NEWS: ❌ FILTERED - Low company relevance: {title[:50]}...")
+                return False
+            
+            # STEP 3: Check for irrelevant patterns
+            for pattern in self.irrelevant_patterns:
+                if pattern in content:
+                    if os.environ.get('BSE_VERBOSE', '0') == '1':
+                        print(f"NEWS: ❌ FILTERED - Irrelevant pattern '{pattern}': {title[:50]}...")
+                    return False
+            
+            # STEP 4: Calculate relevance score
+            relevance_score = self._calculate_relevance_score(content, company_name)
+            
+            # Minimum relevance threshold
+            min_threshold = 0.3
+            is_relevant = relevance_score >= min_threshold
+            
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                status = "✅ RELEVANT" if is_relevant else "❌ FILTERED"
+                print(f"NEWS: {status} (score: {relevance_score:.2f}): {title[:50]}...")
+            
+            return is_relevant
+            
+        except Exception as e:
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"NEWS: Error in relevance check: {e}")
+            return True  # If error, assume relevant to be safe
+    
+    def _count_company_mentions(self, content: str, company_name: str) -> int:
+        """Count how many times the company is mentioned in the content"""
+        try:
+            content_lower = content.lower()
+            company_lower = company_name.lower()
+            
+            # Count exact company name mentions
+            exact_mentions = content_lower.count(company_lower)
+            
+            # Also count mentions of company keywords and variations
+            company_words = company_lower.split()
+            if len(company_words) > 1:
+                # For multi-word companies, count mentions of key words
+                key_word = company_words[0]  # Usually the brand name (e.g., "ola")
+                if len(key_word) > 3:  # Avoid very short words
+                    exact_mentions += content_lower.count(key_word)
+                
+                # Also check for partial matches like "ola electric" in "Ola Electric Mobility Ltd"
+                for i in range(len(company_words)):
+                    for j in range(i+1, len(company_words)+1):
+                        partial_name = ' '.join(company_words[i:j])
+                        if len(partial_name) > 5:  # Only meaningful partial names
+                            exact_mentions += content_lower.count(partial_name)
+            
+            # Special handling for common company name patterns
+            if 'electric' in company_lower and 'ola' in company_lower:
+                # Count "ola electric" specifically
+                exact_mentions += content_lower.count('ola electric')
+                # Count just "ola" when it appears with electric/ev context
+                if 'ola' in content_lower and any(word in content_lower for word in ['electric', 'ev', 'mobility', 'scooter']):
+                    exact_mentions += content_lower.count('ola')
+            
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"NEWS: Company mentions for '{company_name}': {exact_mentions}")
+            
+            return exact_mentions
+            
+        except Exception:
+            return 1  # Default to assuming it's mentioned
+    
+    def _calculate_relevance_score(self, content: str, company_name: str) -> float:
+        """Calculate relevance score based on keywords and company mentions"""
+        try:
+            score = 0.0
+            
+            # Base score for company mentions
+            company_mentions = self._count_company_mentions(content, company_name)
+            score += min(company_mentions * 0.2, 0.6)  # Max 0.6 from company mentions
+            
+            # Score for high relevance keywords
+            for keyword in self.relevance_keywords['high_relevance']:
+                if keyword in content:
+                    score += 0.3
+            
+            # Score for medium relevance keywords
+            for keyword in self.relevance_keywords['medium_relevance']:
+                if keyword in content:
+                    score += 0.15
+            
+            # Penalty for low relevance keywords
+            for keyword in self.relevance_keywords['low_relevance']:
+                if keyword in content:
+                    score -= 0.1
+            
+            # Ensure score is between 0 and 1
+            return max(0.0, min(1.0, score))
+            
+        except Exception:
+            return 0.5  # Default neutral score
+    
     def generate_ai_summary(self, articles: List[Dict], company_name: str) -> str:
         """Generate AI-powered crisp summary of today's news"""
         if not self.ai_api_key or not articles:
@@ -336,12 +578,12 @@ Format: Brief, factual summary suitable for Telegram alert.
                 if rss_result.get('success'):
                     rss_articles = rss_result.get('articles', [])
                     
-                    # Filter for today's articles only
+                    # Filter for today's articles only and apply smart relevance filtering
                     today_articles = []
                     for article in rss_articles:
                         pub_date = article.get('pubDate', article.get('published_at', ''))
-                        # Only include today's articles
-                        if self.is_today_news(pub_date):
+                        # Only include today's articles that are relevant
+                        if self.is_today_news(pub_date) and self.is_relevant_news(article, company_name):
                             article['source_type'] = 'rss'
                             today_articles.append(article)
                     
@@ -382,11 +624,11 @@ Format: Brief, factual summary suitable for Telegram alert.
                     data = response.json()
                     api_articles = data.get('results', [])
                     
-                    # Filter for today's articles only
+                    # Filter for today's articles only and apply smart relevance filtering
                     today_api_articles = []
                     for article in api_articles:
                         pub_date = article.get('pubDate', '')
-                        if self.is_today_news(pub_date):
+                        if self.is_today_news(pub_date) and self.is_relevant_news(article, company_name):
                             article['source_type'] = 'api'
                             today_api_articles.append(article)
                     
@@ -445,12 +687,12 @@ Format: Brief, factual summary suitable for Telegram alert.
                 if rss_result.get('success'):
                     rss_articles = rss_result.get('articles', [])
                     
-                    # Filter for recent articles only
+                    # Filter for recent articles only and apply smart relevance filtering
                     recent_articles = []
                     for article in rss_articles:
                         pub_date = article.get('pubDate', article.get('published_at', ''))
-                        # Only include recent articles
-                        if self.is_recent_news(pub_date):
+                        # Only include recent articles that are relevant
+                        if self.is_recent_news(pub_date) and self.is_relevant_news(article, company_name):
                             article['source_type'] = 'rss'
                             recent_articles.append(article)
                     
@@ -543,47 +785,78 @@ Format: Brief, factual summary suitable for Telegram alert.
         return ', '.join(sorted(sources)) if sources else 'Unknown sources'
     
     def format_crisp_telegram_message(self, company_name: str, articles: List[Dict], ai_summary: str, dedup_stats: Dict = None) -> str:
-        """Format crisp Telegram message without URLs"""
+        """Format user-friendly Telegram message with actual news content"""
         if not articles:
             return f"📰 No news for {company_name} today"
         
         # Header with today's date
         today_formatted = self.today.strftime('%B %d, %Y')
         
-        # Deduplication info (brief)
-        dedup_info = ""
-        if dedup_stats and dedup_stats.get('original_count', 0) > dedup_stats.get('deduplicated_count', 0):
-            original = dedup_stats.get('original_count', 0)
-            final = dedup_stats.get('deduplicated_count', 0)
-            dedup_info = f" (📊 {original}→{final})"
-        
-        # Build message
-        message = f"""📰 TODAY'S NEWS: {company_name}
-📅 {today_formatted}{dedup_info}
+        # Build message with focus on actual news content
+        message = f"""📰 {company_name} - {today_formatted}
 
 💡 {ai_summary}
 
-📊 Coverage: {len(articles)} articles from {self._get_source_summary(articles)}
-
 """
         
-        # Add brief article list (titles only, no URLs)
-        if len(articles) <= 3:
-            message += "📋 Headlines:\n"
+        # Add actual headlines (what users care about)
+        if len(articles) <= 5:
+            message += "📋 Today's Headlines:\n"
             for i, article in enumerate(articles, 1):
                 title = article.get('title', 'Untitled')
-                source = article.get('source', 'Unknown')
                 
-                # Truncate long titles
-                if len(title) > 50:
-                    title = title[:50] + '...'
+                # Clean up title (remove company name if it's redundant)
+                title_clean = self._clean_headline_for_display(title, company_name)
                 
-                message += f"{i}. {title} ({source})\n"
+                # Truncate very long titles but keep them meaningful
+                if len(title_clean) > 80:
+                    title_clean = title_clean[:80] + '...'
+                
+                message += f"{i}. {title_clean}\n"
         else:
-            # Just show count and sources for many articles
-            message += f"📋 {len(articles)} articles from various sources"
+            # For many articles, show top 3 + summary
+            message += "📋 Key Headlines:\n"
+            for i, article in enumerate(articles[:3], 1):
+                title = article.get('title', 'Untitled')
+                title_clean = self._clean_headline_for_display(title, company_name)
+                
+                if len(title_clean) > 80:
+                    title_clean = title_clean[:80] + '...'
+                
+                message += f"{i}. {title_clean}\n"
+            
+            message += f"\n📈 Plus {len(articles) - 3} more developments today"
         
         return message.strip()
+    
+    def _clean_headline_for_display(self, title: str, company_name: str) -> str:
+        """Clean headline for better display - remove redundant company mentions"""
+        try:
+            # Remove redundant company name mentions to avoid repetition
+            title_clean = title
+            
+            # Extract company brand name (first word usually)
+            company_words = company_name.split()
+            if company_words:
+                brand_name = company_words[0]
+                
+                # Remove redundant mentions at the start
+                patterns_to_remove = [
+                    f"{company_name}: ",
+                    f"{company_name} - ",
+                    f"{brand_name}: ",
+                    f"{brand_name} - ",
+                ]
+                
+                for pattern in patterns_to_remove:
+                    if title_clean.startswith(pattern):
+                        title_clean = title_clean[len(pattern):]
+                        break
+            
+            return title_clean.strip()
+            
+        except Exception:
+            return title  # Return original if cleaning fails
 
 def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, telegram_recipients) -> int:
     """Send enhanced news alerts to Telegram recipients"""
