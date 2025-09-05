@@ -559,7 +559,7 @@ Format: Brief, factual summary suitable for Telegram alert.
             main_theme = common_keywords[0]
             return f"{company_name} featured in news today regarding {main_theme} and related developments. {len(articles)} news articles covered various aspects."
         else:
-            return f"{company_name} appeared in {len(articles)} news articles today covering business developments and market activities."
+            return f"Multiple news developments for {company_name} today including business updates, market activities, and corporate announcements."
     
     def fetch_today_news_only(self, company_name: str) -> Dict:
         """Fetch and filter news for today only"""
