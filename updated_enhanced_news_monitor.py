@@ -204,6 +204,8 @@ class EnhancedNewsMonitor:
             'top picks', 'hot stocks', 'best stocks', 'stocks to buy',
             'stocks to watch', 'stocks to avoid', 'penny stocks',
             'multibagger', 'multibagger stocks', 'wealth creators',
+            'stock picks', 'stock ideas', 'stock tips', 'investment tips',
+            'trading tips', 'market tips', 'stock alert', 'buy now', 'sell now',
             
             # Technical analysis noise
             'market volatility', 'technical analysis', 'chart pattern',
@@ -231,7 +233,25 @@ class EnhancedNewsMonitor:
             # Generic financial terms
             'market cap', 'pe ratio', 'price target', 'target price revised',
             'fair value', 'intrinsic value', 'book value',
-            'dividend yield', 'earnings yield'
+            'dividend yield', 'earnings yield', 'stock screener',
+            'portfolio review', 'investment strategy', 'market strategy',
+            'trading strategy', 'stock analysis', 'fundamental analysis',
+            
+            # Market movers and generic lists (CRITICAL)
+            'gainers', 'losers', 'gainers & losers', 'gainers and losers',
+            'top gainers', 'top losers', 'biggest gainers', 'biggest losers',
+            'movers', 'big movers', 'top movers', 'market movers',
+            'stocks in focus', 'stocks to track', 'stocks in news',
+            'buzzing stocks', 'active stocks', 'volume gainers',
+            
+            # Generic market news and multi-company articles (CRITICAL)
+            'key levels', 'stock market live', 'nifty', 'sensex', 'bse',
+            'market today', 'market update', 'live updates', 'market news',
+            'shares:', 'stocks:', 'these stocks', 'these shares',
+            'midcap stocks', 'smallcap stocks', 'largecap stocks',
+            'insurance shareholding', 'mutual fund', 'fii', 'dii',
+            'june quarter', 'march quarter', 'december quarter',
+            'increased shareholding', 'decreased shareholding'
         ]
         
     def is_recent_news(self, pub_date_str: str) -> bool:
@@ -372,11 +392,23 @@ class EnhancedNewsMonitor:
                         print(f"NEWS: 🚫 BLACKLISTED - '{blacklisted_phrase}': {title[:50]}...")
                     return False
             
+            # STEP 1.5: Special check for list articles mentioning multiple companies
+            if self._is_generic_list_article(title, content, company_name):
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"NEWS: 🚫 GENERIC LIST - Multiple companies mentioned: {title[:50]}...")
+                return False
+            
+            # STEP 1.6: Block articles with multiple company names in title
+            if self._has_multiple_companies_in_title(title, company_name):
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"NEWS: 🚫 MULTI-COMPANY TITLE - {title[:50]}...")
+                return False
+            
             # STEP 2: Check if company name is prominently mentioned
             company_mentions = self._count_company_mentions(content, company_name)
             
-            # Filter out articles with very few company mentions
-            if company_mentions < 1:
+            # Filter out articles with very few company mentions (MUCH STRICTER)
+            if company_mentions < 3:
                 if os.environ.get('BSE_VERBOSE', '0') == '1':
                     print(f"NEWS: ❌ FILTERED - Low company relevance: {title[:50]}...")
                 return False
@@ -476,6 +508,80 @@ class EnhancedNewsMonitor:
         except Exception:
             return 0.5  # Default neutral score
     
+    def _is_generic_list_article(self, title: str, content: str, company_name: str) -> bool:
+        """Check if this is a generic list article mentioning multiple companies"""
+        try:
+            # Common patterns for list articles
+            list_indicators = [
+                'among', 'including', 'here\'s what', 'here is what',
+                'top 7', 'top 5', 'top 10', 'top 15', 'top 20',
+                '7 stocks', '5 stocks', '10 stocks', '15 stocks',
+                'these stocks', 'other stocks', 'stocks like'
+            ]
+            
+            title_lower = title.lower()
+            content_lower = content.lower()
+            
+            # Check if it's a list-type article
+            has_list_indicator = any(indicator in title_lower or indicator in content_lower 
+                                   for indicator in list_indicators)
+            
+            if has_list_indicator:
+                # Count how many other company names are mentioned
+                # Common company suffixes to look for
+                company_patterns = [
+                    r'\b\w+\s+ltd\b', r'\b\w+\s+limited\b', 
+                    r'\b\w+\s+corp\b', r'\b\w+\s+inc\b',
+                    r'\b\w+\s+bank\b', r'\b\w+\s+motors\b'
+                ]
+                
+                import re
+                other_companies = 0
+                for pattern in company_patterns:
+                    matches = re.findall(pattern, content_lower)
+                    other_companies += len(matches)
+                
+                # If multiple companies mentioned, it's likely a generic list
+                if other_companies >= 3:
+                    return True
+            
+            return False
+            
+        except Exception:
+            return False
+    
+    def _has_multiple_companies_in_title(self, title: str, target_company: str) -> bool:
+        """Check if title mentions multiple companies (like 'HDFC Bank, Adani Power, Colgate...')"""
+        try:
+            # Look for comma-separated company names
+            if ',' in title:
+                # Count potential company names (words followed by common suffixes)
+                import re
+                company_patterns = [
+                    r'\b[A-Z][a-zA-Z&\s]+(?:Ltd|Limited|Bank|Corp|Inc|Motors|Power|Electric|Industries|Steel|Oil|Gas)\b',
+                    r'\b[A-Z][a-zA-Z&\s]*\s+&\s+[A-Z][a-zA-Z&\s]*\b',  # Company & Company
+                    r'\b[A-Z]{2,}\b'  # Acronyms like HDFC, TVS, M&M
+                ]
+                
+                company_count = 0
+                for pattern in company_patterns:
+                    matches = re.findall(pattern, title)
+                    company_count += len(matches)
+                
+                # If 3+ companies mentioned, it's a generic list
+                if company_count >= 3:
+                    return True
+                    
+                # Also check for specific patterns like "Company1, Company2, Company3"
+                comma_parts = title.split(',')
+                if len(comma_parts) >= 3:
+                    return True
+            
+            return False
+            
+        except Exception:
+            return False
+    
     def generate_ai_summary(self, articles: List[Dict], company_name: str) -> str:
         """Generate AI-powered crisp summary of today's news"""
         if not self.ai_api_key or not articles:
@@ -559,7 +665,13 @@ Format: Brief, factual summary suitable for Telegram alert.
             main_theme = common_keywords[0]
             return f"{company_name} featured in news today regarding {main_theme} and related developments. {len(articles)} news articles covered various aspects."
         else:
-            return f"Multiple news developments for {company_name} today including business updates, market activities, and corporate announcements."
+            # Generate more specific summary based on article count and company
+            if len(articles) == 1:
+                return f"Breaking: {company_name} in news today with significant development."
+            elif len(articles) <= 3:
+                return f"{company_name} featured in {len(articles)} news stories covering key business developments."
+            else:
+                return f"{company_name} making headlines with {len(articles)} major news developments today."
     
     def fetch_today_news_only(self, company_name: str) -> Dict:
         """Fetch and filter news for today only"""
@@ -792,10 +904,8 @@ Format: Brief, factual summary suitable for Telegram alert.
         # Header with today's date
         today_formatted = self.today.strftime('%B %d, %Y')
         
-        # Build message with focus on actual news content
+        # Build message with focus on actual news content  
         message = f"""📰 {company_name} - {today_formatted}
-
-💡 {ai_summary}
 
 """
         
@@ -933,8 +1043,8 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
                 chat_id = recipient['chat_id']
                 user_name = recipient.get('user_name', 'User')
                 
-                # Add user name header with NEW FORMAT identifier
-                personalized_message = f"👤 {user_name}\n" + "─" * 20 + "\n🆕 NEW FORMAT\n" + telegram_message
+                # Add clean header
+                personalized_message = f"🆕 NEWS\n{telegram_message}"
                 
                 try:
                     from database import send_telegram_message_with_user_name
