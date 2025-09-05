@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Price Alerts - BSE Monitor</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f8f9fa;
+        }
+        .price-card {
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease;
+            margin-bottom: 20px;
+        }
+        .price-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+        }
+        .price-up {
+            border-left: 5px solid #198754;
+        }
+        .price-down {
+            border-left: 5px solid #dc3545;
+        }
+        .price-flat {
+            border-left: 5px solid #6c757d;
+        }
+        .price-value {
+            font-size: 1.8rem;
+            font-weight: bold;
+        }
+        .price-change-up {
+            color: #198754;
+        }
+        .price-change-down {
+            color: #dc3545;
+        }
+        .volume-badge {
+            background-color: #f1f1f1;
+            color: #333;
+            font-weight: normal;
+        }
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1050;
+        }
+        .api-status {
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="#">BSE Monitor</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <a class="nav-link" href="/">Dashboard</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link active" href="/price-alerts">Price Alerts</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/fyers/status">Fyers Status</a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container py-4">
+        <div class="toast-container" id="toastContainer"></div>
+
+        <h1 class="mb-4">Smart Price Alerts</h1>
+        
+        <div id="apiStatus" class="api-status bg-light">
+            <div class="spinner-border spinner-border-sm text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            Checking API status...
+        </div>
+
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="input-group">
+                    <input type="text" id="symbolInput" class="form-control" placeholder="Enter stock symbol (e.g., RELIANCE)">
+                    <button class="btn btn-primary" id="fetchButton">Fetch Price</button>
+                </div>
+                <div class="form-text">Enter BSE stock symbols to get real-time price and volume data</div>
+            </div>
+            <div class="col-md-6 text-md-end mt-3 mt-md-0">
+                <button class="btn btn-outline-success" id="refreshAllButton">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh All
+                </button>
+                <button class="btn btn-outline-secondary" id="clearAllButton">
+                    <i class="bi bi-x-lg"></i> Clear All
+                </button>
+            </div>
+        </div>
+
+        <div class="row" id="priceCardsContainer">
+            <!-- Price cards will be inserted here -->
+        </div>
+
+        <div class="alert alert-info mt-4" id="noDataMessage">
+            <h4 class="alert-heading">No stocks added yet!</h4>
+            <p>Enter a stock symbol above to fetch price data. Try RELIANCE, TCS, HDFCBANK, or INFY.</p>
+        </div>
+    </div>
+
+    <!-- Price Card Template -->
+    <template id="priceCardTemplate">
+        <div class="col-md-6 col-lg-4">
+            <div class="card price-card">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0 symbol-name">SYMBOL</h5>
+                        <span class="badge market-status">LIVE</span>
+                    </div>
+                    <div class="price-value my-3">₹0.00</div>
+                    <p class="price-change mb-2">+0.00 (0.00%)</p>
+                    
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <span class="badge volume-badge">Vol: 0K</span>
+                        <small class="text-muted date-time">00:00:00</small>
+                    </div>
+                    
+                    <div class="d-flex justify-content-between">
+                        <small class="text-muted">Range: <span class="day-range">₹0.00 - ₹0.00</span></small>
+                        <div>
+                            <button class="btn btn-sm btn-outline-primary refresh-btn">
+                                <i class="bi bi-arrow-clockwise"></i>
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger remove-btn">
+                                <i class="bi bi-x"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Check API status on page load
+            checkApiStatus();
+            
+            // Initialize UI with stored symbols
+            loadSavedSymbols();
+            
+            // Event listeners
+            document.getElementById('fetchButton').addEventListener('click', fetchSymbolPrice);
+            document.getElementById('symbolInput').addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') fetchSymbolPrice();
+            });
+            document.getElementById('refreshAllButton').addEventListener('click', refreshAllPrices);
+            document.getElementById('clearAllButton').addEventListener('click', clearAllSymbols);
+            
+            // Auto-refresh prices every 60 seconds
+            setInterval(refreshAllPrices, 60000);
+        });
+        
+        // API status check
+        function checkApiStatus() {
+            fetch('/api/price/status')
+                .then(response => response.json())
+                .then(data => {
+                    const statusElement = document.getElementById('apiStatus');
+                    
+                    if (data.success && data.fyers_connected) {
+                        statusElement.className = 'api-status bg-success text-white';
+                        statusElement.innerHTML = `<strong>✓ API Connected</strong> - Fyers data available`;
+                    } else if (data.success && !data.fyers_connected) {
+                        statusElement.className = 'api-status bg-warning';
+                        statusElement.innerHTML = `<strong>⚠️ API Connected</strong> - <a href="${data.connect_url}" class="alert-link">Connect Fyers</a> for price data`;
+                    } else {
+                        statusElement.className = 'api-status bg-danger text-white';
+                        statusElement.innerHTML = `<strong>✗ API Error</strong> - ${data.error || 'Unable to connect to price API'}`;
+                    }
+                })
+                .catch(error => {
+                    const statusElement = document.getElementById('apiStatus');
+                    statusElement.className = 'api-status bg-danger text-white';
+                    statusElement.innerHTML = `<strong>✗ API Error</strong> - ${error.message}`;
+                });
+        }
+        
+        // Load saved symbols from localStorage
+        function loadSavedSymbols() {
+            const savedSymbols = getSavedSymbols();
+            
+            if (savedSymbols.length === 0) {
+                document.getElementById('noDataMessage').style.display = 'block';
+            } else {
+                document.getElementById('noDataMessage').style.display = 'none';
+                savedSymbols.forEach(symbol => fetchSymbolData(symbol));
+            }
+        }
+        
+        // Get saved symbols from localStorage
+        function getSavedSymbols() {
+            const savedSymbols = localStorage.getItem('bseMonitorSymbols');
+            return savedSymbols ? JSON.parse(savedSymbols) : [];
+        }
+        
+        // Save symbols to localStorage
+        function saveSymbols(symbols) {
+            localStorage.setItem('bseMonitorSymbols', JSON.stringify(symbols));
+        }
+        
+        // Fetch price for the entered symbol
+        function fetchSymbolPrice() {
+            const symbolInput = document.getElementById('symbolInput');
+            const symbol = symbolInput.value.trim().toUpperCase();
+            
+            if (!symbol) {
+                showToast('Please enter a stock symbol', 'warning');
+                return;
+            }
+            
+            // Check if symbol already exists
+            const savedSymbols = getSavedSymbols();
+            if (savedSymbols.includes(symbol)) {
+                showToast(`${symbol} is already in your list`, 'info');
+                symbolInput.value = '';
+                return;
+            }
+            
+            fetchSymbolData(symbol, true);
+            symbolInput.value = '';
+        }
+        
+        // Fetch data for a symbol
+        function fetchSymbolData(symbol, isNewSymbol = false) {
+            const container = document.getElementById('priceCardsContainer');
+            
+            fetch(`/api/price/smart-price/${symbol}`)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch data for ${symbol}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.success && data.data.data_available) {
+                        // If adding a new symbol, save it to localStorage
+                        if (isNewSymbol) {
+                            const savedSymbols = getSavedSymbols();
+                            savedSymbols.push(symbol);
+                            saveSymbols(savedSymbols);
+                            showToast(`Added ${symbol} to your watchlist`, 'success');
+                        }
+                        
+                        // Display data
+                        renderPriceCard(data.data, isNewSymbol);
+                        document.getElementById('noDataMessage').style.display = 'none';
+                    } else {
+                        showToast(`Error: ${data.error || 'Failed to get data for ' + symbol}`, 'danger');
+                    }
+                })
+                .catch(error => {
+                    showToast(`Error: ${error.message}`, 'danger');
+                });
+        }
+        
+        // Render a price card for the symbol data
+        function renderPriceCard(data, isNewSymbol = false) {
+            const container = document.getElementById('priceCardsContainer');
+            const template = document.getElementById('priceCardTemplate');
+            
+            // Check if card already exists for this symbol
+            const existingCard = document.querySelector(`.price-card[data-symbol="${data.symbol}"]`);
+            if (existingCard && !isNewSymbol) {
+                // Update existing card
+                updateExistingCard(existingCard, data);
+                return;
+            }
+            
+            // Create new card
+            const cardElement = template.content.cloneNode(true);
+            const card = cardElement.querySelector('.price-card');
+            
+            // Set symbol as data attribute
+            card.setAttribute('data-symbol', data.symbol);
+            
+            // Set change direction class
+            if (data.change_direction === 'up') {
+                card.classList.add('price-up');
+            } else if (data.change_direction === 'down') {
+                card.classList.add('price-down');
+            } else {
+                card.classList.add('price-flat');
+            }
+            
+            // Fill in the card data
+            cardElement.querySelector('.symbol-name').textContent = data.symbol;
+            
+            const marketStatusBadge = cardElement.querySelector('.market-status');
+            marketStatusBadge.textContent = data.market_status.toUpperCase();
+            if (data.market_status === 'live') {
+                marketStatusBadge.classList.add('bg-success');
+            } else if (data.market_status === 'closed') {
+                marketStatusBadge.classList.add('bg-danger');
+            } else {
+                marketStatusBadge.classList.add('bg-secondary');
+            }
+            
+            cardElement.querySelector('.price-value').textContent = data.formatted_price;
+            
+            const priceChange = cardElement.querySelector('.price-change');
+            priceChange.textContent = data.formatted_change;
+            if (data.price_change > 0) {
+                priceChange.classList.add('price-change-up');
+            } else if (data.price_change < 0) {
+                priceChange.classList.add('price-change-down');
+            }
+            
+            cardElement.querySelector('.volume-badge').textContent = `Vol: ${data.volume_formatted}`;
+            
+            const timestamp = new Date(data.timestamp);
+            cardElement.querySelector('.date-time').textContent = timestamp.toLocaleTimeString();
+            
+            cardElement.querySelector('.day-range').textContent = `₹${data.low.toFixed(2)} - ₹${data.high.toFixed(2)}`;
+            
+            // Add event listeners for buttons
+            cardElement.querySelector('.refresh-btn').addEventListener('click', function() {
+                fetchSymbolData(data.symbol);
+            });
+            
+            cardElement.querySelector('.remove-btn').addEventListener('click', function() {
+                removeSymbol(data.symbol);
+            });
+            
+            // Append to container, at the beginning if it's new
+            if (isNewSymbol && container.firstChild) {
+                container.insertBefore(cardElement, container.firstChild);
+            } else {
+                container.appendChild(cardElement);
+            }
+        }
+        
+        // Update existing card with new data
+        function updateExistingCard(card, data) {
+            // Update card classes
+            card.classList.remove('price-up', 'price-down', 'price-flat');
+            if (data.change_direction === 'up') {
+                card.classList.add('price-up');
+            } else if (data.change_direction === 'down') {
+                card.classList.add('price-down');
+            } else {
+                card.classList.add('price-flat');
+            }
+            
+            // Update market status
+            const marketStatusBadge = card.querySelector('.market-status');
+            marketStatusBadge.textContent = data.market_status.toUpperCase();
+            marketStatusBadge.className = 'badge market-status';
+            if (data.market_status === 'live') {
+                marketStatusBadge.classList.add('bg-success');
+            } else if (data.market_status === 'closed') {
+                marketStatusBadge.classList.add('bg-danger');
+            } else {
+                marketStatusBadge.classList.add('bg-secondary');
+            }
+            
+            // Update price value and flash animation
+            const priceValueElement = card.querySelector('.price-value');
+            const oldPrice = parseFloat(priceValueElement.textContent.replace('₹', ''));
+            priceValueElement.textContent = data.formatted_price;
+            
+            if (data.price !== oldPrice) {
+                // Flash animation
+                priceValueElement.classList.add('text-primary');
+                setTimeout(() => {
+                    priceValueElement.classList.remove('text-primary');
+                }, 1000);
+            }
+            
+            // Update price change
+            const priceChange = card.querySelector('.price-change');
+            priceChange.textContent = data.formatted_change;
+            priceChange.className = 'price-change mb-2';
+            if (data.price_change > 0) {
+                priceChange.classList.add('price-change-up');
+            } else if (data.price_change < 0) {
+                priceChange.classList.add('price-change-down');
+            }
+            
+            // Update volume
+            card.querySelector('.volume-badge').textContent = `Vol: ${data.volume_formatted}`;
+            
+            // Update timestamp
+            const timestamp = new Date(data.timestamp);
+            card.querySelector('.date-time').textContent = timestamp.toLocaleTimeString();
+            
+            // Update range
+            card.querySelector('.day-range').textContent = `₹${data.low.toFixed(2)} - ₹${data.high.toFixed(2)}`;
+        }
+        
+        // Remove a symbol from the watchlist
+        function removeSymbol(symbol) {
+            // Remove from localStorage
+            const savedSymbols = getSavedSymbols();
+            const index = savedSymbols.indexOf(symbol);
+            if (index !== -1) {
+                savedSymbols.splice(index, 1);
+                saveSymbols(savedSymbols);
+            }
+            
+            // Remove card from UI
+            const card = document.querySelector(`.price-card[data-symbol="${symbol}"]`).closest('.col-md-6');
+            if (card) {
+                card.remove();
+            }
+            
+            // Show message if no symbols left
+            if (savedSymbols.length === 0) {
+                document.getElementById('noDataMessage').style.display = 'block';
+            }
+            
+            showToast(`Removed ${symbol} from your watchlist`, 'info');
+        }
+        
+        // Refresh all prices
+        function refreshAllPrices() {
+            const savedSymbols = getSavedSymbols();
+            if (savedSymbols.length === 0) {
+                return;
+            }
+            
+            // Instead of individual API calls, use batch endpoint
+            fetch('/api/price/batch-prices', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ symbols: savedSymbols }),
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.data) {
+                        // Update each symbol's card
+                        Object.entries(data.data).forEach(([symbol, priceData]) => {
+                            if (priceData.data_available) {
+                                renderPriceCard(priceData);
+                            }
+                        });
+                        
+                        showToast(`Updated ${Object.keys(data.data).length} symbols`, 'success', 2000);
+                    } else {
+                        showToast('Failed to update prices', 'warning');
+                    }
+                })
+                .catch(error => {
+                    showToast(`Error refreshing prices: ${error.message}`, 'danger');
+                });
+        }
+        
+        // Clear all symbols
+        function clearAllSymbols() {
+            if (confirm('Are you sure you want to clear all symbols from your watchlist?')) {
+                // Clear localStorage
+                saveSymbols([]);
+                
+                // Clear UI
+                document.getElementById('priceCardsContainer').innerHTML = '';
+                document.getElementById('noDataMessage').style.display = 'block';
+                
+                showToast('Cleared all symbols from your watchlist', 'info');
+            }
+        }
+        
+        // Show toast notification
+        function showToast(message, type, duration = 3000) {
+            const toastContainer = document.getElementById('toastContainer');
+            
+            const toast = document.createElement('div');
+            toast.className = `toast show bg-${type} text-white`;
+            toast.setAttribute('role', 'alert');
+            toast.setAttribute('aria-live', 'assertive');
+            toast.setAttribute('aria-atomic', 'true');
+            
+            toast.innerHTML = `
+                <div class="toast-body">
+                    ${message}
+                </div>
+            `;
+            
+            toastContainer.appendChild(toast);
+            
+            // Remove after duration
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => {
+                    toast.remove();
+                }, 300);
+            }, duration);
+        }
+    </script>
+</body>
+</html>

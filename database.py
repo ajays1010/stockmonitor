@@ -8,6 +8,14 @@ logging.basicConfig(level=logging.INFO)
 api_logger = logging.getLogger('financial_api')
 api_logger.setLevel(logging.INFO if os.environ.get('YAHOO_VERBOSE', '0') == '1' or os.environ.get('BSE_VERBOSE', '0') == '1' else logging.WARNING)
 
+# Suppress yfinance error logging for delisted/invalid symbols
+yfinance_logger = logging.getLogger('yfinance')
+yfinance_logger.setLevel(logging.CRITICAL if os.environ.get('YAHOO_VERBOSE', '0') != '1' else logging.WARNING)
+
+# Alternative API configurations
+FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', 'd2sjfo1r01qiq7a4j7igd2sjfo1r01qiq7a4j7j0')
+ALPHA_VANTAGE_API_KEY = os.environ.get('ALPHA_VANTAGE_API_KEY', 'demo')
+
 # Patch httpx to support 'proxy' kwarg by remapping to 'proxies' for older httpx versions
 try:
     import httpx as _httpx
@@ -39,6 +47,14 @@ from supabase import create_client, Client
 from gotrue.errors import AuthApiError
 import firebase_admin
 from firebase_admin import credentials, auth
+
+# Fix for JWT timing issues - add clock skew tolerance globally
+try:
+    import firebase_admin.auth
+    firebase_admin.auth._clock_skew_seconds = 300
+    print("Global Firebase clock skew tolerance set to 300 seconds")
+except Exception:
+    pass
 from datetime import datetime, timezone, timedelta
 
 # --- Firebase Admin SDK Initialization ---
@@ -90,8 +106,38 @@ def initialize_firebase():
         return False
 
     try:
+        # Check if Firebase is already initialized
+        try:
+            # Try to get an existing app
+            existing_app = firebase_admin.get_app()
+            if existing_app:
+                firebase_app = existing_app
+                print("Firebase Admin SDK already initialized (found existing app).")
+                return True
+        except ValueError:
+            # No app exists, continue with initialization
+            pass
+        
         cred = credentials.Certificate(key_path)
         firebase_app = firebase_admin.initialize_app(cred)
+        
+        # Configure Firebase with clock skew tolerance to fix JWT timing issues
+        try:
+            import firebase_admin.auth as fb_auth
+            # Set clock skew tolerance to 300 seconds (5 minutes) for better compatibility
+            fb_auth._clock_skew_seconds = 300
+            print("Firebase clock skew tolerance set to 300 seconds (5 minutes)")
+            
+            # Also try to set it on the credentials object
+            try:
+                cred._clock_skew_seconds = 300
+                print("Clock skew tolerance also set on credentials")
+            except:
+                pass
+                
+        except Exception as e:
+            print(f"Note: Could not set clock skew tolerance: {e}")
+        
         print("Firebase Admin SDK initialized successfully.")
         return True
     except Exception as e:
@@ -272,20 +318,109 @@ def _latest_cmp(sym: str):
                     print(f"yfinance history error for {sym} {iv}: {hist_err}")
                 continue
     except Exception as yf_err:
-        if os.environ.get("YAHOO_VERBOSE", "0") == "1":
-            # Check for common delisted/invalid symbol patterns
-            err_msg = str(yf_err).lower()
-            if any(phrase in err_msg for phrase in ['delisted', 'no data', 'invalid symbol', 'not found']):
+        # Suppress common yfinance errors for delisted/invalid symbols to reduce log noise
+        err_msg = str(yf_err).lower()
+        if any(phrase in err_msg for phrase in ['delisted', 'no data', 'invalid symbol', 'not found', 'expecting value']):
+            # Only log if verbose mode is enabled
+            if os.environ.get("YAHOO_VERBOSE", "0") == "1":
                 print(f"yfinance symbol {sym} appears to be delisted or invalid: {yf_err}")
-            else:
+        else:
+            # Log other unexpected errors
+            if os.environ.get("YAHOO_VERBOSE", "0") == "1":
                 print(f"yfinance error for {sym}: {yf_err}")
         pass
     return None, None
 
+def get_bse_direct_price(bse_code):
+    """Get price directly from BSE API (no API key needed)"""
+    try:
+        url = f"https://api.bseindia.com/BseIndiaAPI/api/StockReachGraph/w"
+        params = {'scripcode': bse_code, 'flag': '0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        
+        response = _requests.get(url, params=params, headers=headers, timeout=10)
+        if response.status_code == 200:
+            # Handle potential JSON parsing issues with BSE API
+            try:
+                data = response.json()
+            except Exception as json_err:
+                # Try to clean the response text
+                text = response.text.strip()
+                if text.startswith('(') and text.endswith(')'):
+                    # Remove JSONP wrapper if present
+                    text = text[1:-1]
+                try:
+                    import json
+                    data = json.loads(text)
+                except:
+                    if os.environ.get("BSE_VERBOSE", "0") == "1":
+                        print(f"BSE API response parsing failed for {bse_code}. Raw response: {response.text[:200]}")
+                    return None, None, None
+            
+            if 'Data' in data and data['Data']:
+                current_price = data['Data'][0].get('CurrRate')
+                prev_close = data['Data'][0].get('PrevRate')
+                if current_price:
+                    return float(current_price), float(prev_close) if prev_close else None, "BSE_DIRECT"
+    except Exception as e:
+        if os.environ.get("BSE_VERBOSE", "0") == "1":
+            print(f"BSE Direct API error for {bse_code}: {e}")
+    return None, None, None
+
+def get_finnhub_price(symbol):
+    """Get price from Finnhub API (for US stocks)"""
+    try:
+        url = f"https://finnhub.io/api/v1/quote"
+        params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
+        
+        response = _requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if 'error' not in data and data.get('c', 0) != 0:
+                current_price = data.get('c')
+                prev_close = data.get('pc')
+                return current_price, prev_close, "FINNHUB"
+    except Exception as e:
+        if os.environ.get("FINNHUB_VERBOSE", "0") == "1":
+            print(f"Finnhub API error for {symbol}: {e}")
+    return None, None, None
+
+def get_cmp_and_prev_enhanced(symbol: str):
+    """Enhanced price fetching with BSE Direct API fallback"""
+    # First try the original Yahoo Finance method
+    try:
+        price, source = _latest_cmp(symbol)
+        if price is not None:
+            # Try to get previous close from Yahoo
+            try:
+                meta = _fetch_chart_meta(symbol)
+                prev_close = meta.get('previousClose') if meta else None
+                return price, prev_close, source
+            except:
+                return price, None, source
+    except Exception as e:
+        if os.environ.get("YAHOO_VERBOSE", "0") == "1":
+            print(f"Yahoo Finance failed for {symbol}: {e}")
+    
+    # Fallback to BSE Direct API if symbol looks like BSE code
+    bse_code = _yahoo_symbol_to_bse_code(symbol)
+    if bse_code:
+        try:
+            price, prev_close, source = get_bse_direct_price(bse_code)
+            if price is not None:
+                if os.environ.get("BSE_VERBOSE", "0") == "1":
+                    print(f"✅ BSE Direct API success for {bse_code}: ₹{price}")
+                return price, prev_close, source
+        except Exception as e:
+            if os.environ.get("BSE_VERBOSE", "0") == "1":
+                print(f"BSE Direct API failed for {bse_code}: {e}")
+    
+    return None, None, None
+
 def get_cmp_with_fallback(symbol: str, fallback_message: str = "Data unavailable"):
     """Get current market price with graceful fallback for unavailable data"""
     try:
-        price, prev_close, source = get_cmp_and_prev(symbol)
+        price, prev_close, source = get_cmp_and_prev_enhanced(symbol)
         if price is not None:
             return {
                 'success': True,
@@ -1652,9 +1787,20 @@ def send_script_messages_to_telegram(user_client, user_id: str, monitored_scrips
             bse_code = meta['bse_code']
             company_name = meta['company_name']
 
-            # Current price with robust logic
-            cmp_price, prev_close, _src = get_cmp_and_prev(symbol)
-            current_price = cmp_price if cmp_price is not None else 'N/A'
+            # Current price with enhanced logic and BSE Direct API fallback
+            try:
+                cmp_price, prev_close, _src = get_cmp_and_prev_enhanced(symbol)
+                current_price = cmp_price if cmp_price is not None else 'N/A'
+                if os.environ.get("BSE_VERBOSE", "0") == "1" and _src:
+                    print(f"✅ Price fetched for {company_name} ({symbol}): ₹{cmp_price} via {_src}")
+            except Exception as price_err:
+                # Use fallback for price data
+                price_result = get_cmp_with_fallback(symbol, f"Data unavailable for {company_name}")
+                current_price = 'N/A'
+                cmp_price = None
+                prev_close = None
+                if os.environ.get("YAHOO_VERBOSE", "0") == "1":
+                    print(f"Price fetch failed for {symbol} ({company_name}): {price_err}")
 
             # Calculate percentage change
             pct_change = None

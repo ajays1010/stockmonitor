@@ -85,7 +85,3 @@ services:
     envVars:
       - key: CRON_SECRET_KEY
         sync: false
-
-
-
-

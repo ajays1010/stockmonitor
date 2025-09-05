@@ -1,0 +1,44 @@
+2025-09-04T06:04:15.548971 - ERROR Unhandled Exception: {'code': '42703', 'details': None, 'hint': None, 'message': 'column monitored_scrips.user_id does not exist'}
+Traceback: Traceback (most recent call last):
+  File "C:\Users\LENOVO\AppData\Local\Programs\Python\Python311\Lib\site-packages\flask\app.py", line 867, in full_dispatch_request
+    rv = self.dispatch_request()
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\LENOVO\AppData\Local\Programs\Python\Python311\Lib\site-packages\flask\app.py", line 852, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\BSE monitor\Working one with basic trigger\multiuser-main\stockmonitor\app.py", line 144, in decorated_function
+    return f(sb_client, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\BSE monitor\Working one with basic trigger\multiuser-main\stockmonitor\app.py", line 964, in dashboard
+    monitored_scrips = db.get_user_scrips(sb, user_id)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\BSE monitor\Working one with basic trigger\multiuser-main\stockmonitor\database.py", line 667, in get_user_scrips
+    .execute()
+     ^^^^^^^^^
+  File "C:\Users\LENOVO\AppData\Local\Programs\Python\Python311\Lib\site-packages\postgrest\_sync\request_builder.py", line 70, in execute
+    raise APIError(r.json())
+postgrest.exceptions.APIError: {'code': '42703', 'details': None, 'hint': None, 'message': 'column monitored_scrips.user_id does not exist'}
+
+--------------------------------------------------------------------------------
+2025-09-04T06:04:15.548971 - ERROR Unhandled Exception: {'code': '42703', 'details': None, 'hint': None, 'message': 'column monitored_scrips.user_id does not exist'}
+Traceback: Traceback (most recent call last):
+  File "C:\Users\LENOVO\AppData\Local\Programs\Python\Python311\Lib\site-packages\flask\app.py", line 867, in full_dispatch_request
+    rv = self.dispatch_request()
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\LENOVO\AppData\Local\Programs\Python\Python311\Lib\site-packages\flask\app.py", line 852, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\BSE monitor\Working one with basic trigger\multiuser-main\stockmonitor\app.py", line 144, in decorated_function
+    return f(sb_client, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\BSE monitor\Working one with basic trigger\multiuser-main\stockmonitor\app.py", line 964, in dashboard
+    monitored_scrips = db.get_user_scrips(sb, user_id)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\BSE monitor\Working one with basic trigger\multiuser-main\stockmonitor\database.py", line 667, in get_user_scrips
+    .execute()
+     ^^^^^^^^^
+  File "C:\Users\LENOVO\AppData\Local\Programs\Python\Python311\Lib\site-packages\postgrest\_sync\request_builder.py", line 70, in execute
+    raise APIError(r.json())
+postgrest.exceptions.APIError: {'code': '42703', 'details': None, 'hint': None, 'message': 'column monitored_scrips.user_id does not exist'}
+
+--------------------------------------------------------------------------------
