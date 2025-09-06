@@ -58,10 +58,9 @@ def check_news_already_sent(user_client, article: Dict, company_name: str) -> bo
         
         # First check by article_id and company
         result = user_client.table('processed_news_articles')\
-            .select('id, created_at')\
+            .select('id')\
             .eq('article_id', article_id)\
             .eq('stock_query', company_name)\
-            .gte('created_at', cutoff_date.isoformat())\
             .execute()
         
         if len(result.data) > 0:
@@ -615,14 +614,13 @@ class EnhancedNewsMonitor:
                 else:
                     return False
             
-            # Check if this user received this article in last 48 hours
-            cutoff_date = datetime.now() - timedelta(hours=48)
+            # Check if this user received this article (no time limit for user-specific check)
+            # cutoff_date = datetime.now() - timedelta(hours=48)
             
             result = user_client.table('processed_news_articles')\
                 .select('sent_to_users')\
                 .eq('article_id', article_id)\
                 .eq('stock_query', company_name)\
-                .gte('created_at', cutoff_date.isoformat())\
                 .execute()
             
             for record in result.data:
@@ -1050,6 +1048,9 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
         # Create news monitor instance
         news_monitor = EnhancedNewsMonitor()
         
+        if os.environ.get('BSE_VERBOSE', '0') == '1':
+            print(f"NEWS: Created news monitor instance for user {user_id}")
+        
         # Process each monitored scrip
         for scrip in monitored_scrips:
             company_name = scrip.get('company_name', '')
@@ -1079,7 +1080,7 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
                 # Check both by article ID and by user_id + company combination
                 if not check_news_already_sent(user_client, article, company_name):
                     # Additional check: has this specific user received this article?
-                    if not self._check_user_already_received_article(user_client, article, company_name, user_id):
+                    if not news_monitor._check_user_already_received_article(user_client, article, company_name, user_id):
                         new_articles.append(article)
                     else:
                         if os.environ.get('BSE_VERBOSE', '0') == '1':
