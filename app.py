@@ -276,9 +276,9 @@ def cron_master():
         # Check if current minute is 0 or 30 (within ±2 minutes for tolerance)
         current_minute = now_ist.minute
         should_run_news = (
-            current_minute in range(0, 3) or        # :00-:02
-            current_minute in range(28, 33) or      # :28-:32 (covers :30)
-            current_minute in range(58, 61)         # :58-:00 (covers next :00)
+            current_minute in range(0, 5) or        # :00-:04 (wider window)
+            current_minute in range(25, 35) or      # :25-:34 (wider window for :30)
+            current_minute in range(55, 61)         # :55-:00 (wider window)
         )
         
         if should_run_news:
@@ -316,31 +316,50 @@ def cron_master():
         
         # Run daily summary if:
         # - It's a working day
-        # - Current time is within 10 minutes of 16:30 (16:25-16:35)
+        # - Current time is within 2 minutes of 16:30 (16:28-16:32) - NARROW WINDOW
         # - Haven't run it today already
         should_run_summary = (
             is_working_day and 
-            time_diff <= 5 and 
-            now_ist >= summary_time_target.replace(minute=25)  # After 16:25
+            time_diff <= 2 and  # Changed from 10 to 2 minutes
+            now_ist >= summary_time_target.replace(minute=28)  # After 16:28
         )
         
         if should_run_summary:
-            # Check if already run today with a more robust check
+            # Check if already run today - improved duplicate detection
             today_start = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
             try:
                 existing_runs = sb.table('cron_run_logs').select('created_at').eq('job', 'daily_summary').gte('created_at', today_start.isoformat()).execute()
                 if existing_runs.data:
-                    # Check if any run was within the last 2 hours (prevent duplicates within same window)
-                    from datetime import datetime
+                    # Check if any run was within the last 30 minutes (much shorter window)
                     for run in existing_runs.data:
-                        run_time = datetime.fromisoformat(run['created_at'].replace('Z', '+00:00'))
-                        if (now_ist - run_time).total_seconds() < 1800:  # 2 hours
-                            results['skipped_jobs'].append({
-                                'name': 'daily_summary',
-                                'reason': 'Already executed today (recent run detected)'
-                            })
-                            should_run_summary = False
-                            break
+                        try:
+                            # Handle both timezone-aware and naive datetime strings
+                            run_time_str = run['created_at']
+                            if run_time_str.endswith('Z'):
+                                run_time_str = run_time_str.replace('Z', '+00:00')
+                            elif '+' not in run_time_str and 'T' in run_time_str:
+                                run_time_str += '+00:00'
+                            
+                            run_time = datetime.fromisoformat(run_time_str)
+                            
+                            # Convert to IST for comparison
+                            if run_time.tzinfo is not None:
+                                run_time_ist = run_time.astimezone(now_ist.tzinfo)
+                            else:
+                                run_time_ist = run_time.replace(tzinfo=now_ist.tzinfo)
+                            
+                            time_since_run = (now_ist - run_time_ist).total_seconds()
+                            
+                            if time_since_run < 1800:  # 30 minutes instead of 2 hours
+                                results['skipped_jobs'].append({
+                                    'name': 'daily_summary',
+                                    'reason': f'Already executed today at {run_time_ist.strftime("%H:%M")} ({time_since_run/60:.0f} min ago)'
+                                })
+                                should_run_summary = False
+                                break
+                        except Exception as parse_error:
+                            # If we can't parse the time, assume it's old and continue
+                            continue
                 
                 if should_run_summary:  # Still should run
                     jobs_to_run.append({
@@ -358,7 +377,7 @@ def cron_master():
         else:
             results['skipped_jobs'].append({
                 'name': 'daily_summary', 
-                'reason': f'Not scheduled time. Current: {now_ist.strftime("%H:%M")}, Target: 16:30 (±10min)'
+                'reason': f'Not scheduled time. Current: {now_ist.strftime("%H:%M")}, Target: 16:30 (±2min)'
             })
         
         # Execute the jobs
@@ -1306,6 +1325,7 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', os.environ.get('FLASK_RUN_PORT', 5000)))
     debug = os.environ.get('FLASK_DEBUG', '0') == '1'
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
 
 
