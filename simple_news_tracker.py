@@ -15,6 +15,10 @@ def check_news_sent_simple(user_client, article: Dict, company_name: str, user_i
     Returns True if already sent, False if new
     """
     try:
+        # First, test if we can access the table at all
+        print(f"🔍 DEBUG: Testing table access...")
+        test_result = user_client.table('news_sent_tracking').select('id').limit(1).execute()
+        print(f"🔍 DEBUG: Table access test successful, found {len(test_result.data)} records")
         # Generate article ID
         article_id = article.get('article_id', '')
         if not article_id:
@@ -35,18 +39,21 @@ def check_news_sent_simple(user_client, article: Dict, company_name: str, user_i
             .eq('user_id', user_id)\
             .execute()
         
+        print(f"🔍 DEBUG: Checking article_id={article_id[:8]}..., company={company_name}, user={user_id[:8]}...")
+        print(f"🔍 DEBUG: Query result: {len(result.data)} records found")
+        
         if len(result.data) > 0:
-            if os.environ.get('BSE_VERBOSE', '0') == '1':
-                print(f"NEWS: 🚫 ALREADY SENT - Article {article_id[:8]}... to user {user_id[:8]}... for {company_name}")
+            print(f"NEWS: 🚫 ALREADY SENT - Article {article_id[:8]}... to user {user_id[:8]}... for {company_name}")
             return True
         
-        if os.environ.get('BSE_VERBOSE', '0') == '1':
-            print(f"NEWS: ✅ NEW FOR USER - Article {article_id[:8]}... for user {user_id[:8]}... and {company_name}")
+        print(f"NEWS: ✅ NEW FOR USER - Article {article_id[:8]}... for user {user_id[:8]}... and {company_name}")
         return False
         
     except Exception as e:
-        if os.environ.get('BSE_VERBOSE', '0') == '1':
-            print(f"NEWS: Error checking news_sent_tracking: {e}")
+        print(f"❌ ERROR in check_news_sent_simple: {e}")
+        print(f"❌ ERROR type: {type(e)}")
+        import traceback
+        print(f"❌ ERROR traceback: {traceback.format_exc()}")
         # Fallback to old system if new table doesn't exist
         return check_news_already_sent_fallback(user_client, article, company_name, user_id)
 
@@ -55,6 +62,10 @@ def store_news_sent_simple(user_client, article: Dict, company_name: str, user_i
     Store that this article was sent to this user for this company
     """
     try:
+        # Test table access before inserting
+        print(f"🔍 DEBUG: Testing table access for insert...")
+        test_result = user_client.table('news_sent_tracking').select('id').limit(1).execute()
+        print(f"🔍 DEBUG: Table accessible for insert, found {len(test_result.data)} existing records")
         # Generate article ID
         article_id = article.get('article_id', '')
         if not article_id:
@@ -77,16 +88,20 @@ def store_news_sent_simple(user_client, article: Dict, company_name: str, user_i
             # sent_at will be auto-populated by DEFAULT CURRENT_TIMESTAMP
         }
         
-        # Insert with ON CONFLICT DO NOTHING to handle race conditions
-        user_client.table('news_sent_tracking').insert(tracking_data).execute()
+        # Insert with debug logging
+        print(f"🔍 DEBUG: Inserting tracking_data: {tracking_data}")
         
-        if os.environ.get('BSE_VERBOSE', '0') == '1':
-            title = article.get('title', 'Unknown')[:50]
-            print(f"NEWS: 📝 TRACKED - Stored {title}... for user {user_id[:8]}...")
+        result = user_client.table('news_sent_tracking').insert(tracking_data).execute()
+        
+        print(f"🔍 DEBUG: Insert result: {result}")
+        print(f"NEWS: 📝 TRACKED - Stored {article.get('title', 'Unknown')[:50]}... for user {user_id[:8]}...")
             
     except Exception as e:
-        if os.environ.get('BSE_VERBOSE', '0') == '1':
-            print(f"NEWS: Error storing in news_sent_tracking: {e}")
+        print(f"❌ ERROR in store_news_sent_simple: {e}")
+        print(f"❌ ERROR type: {type(e)}")
+        import traceback
+        print(f"❌ ERROR traceback: {traceback.format_exc()}")
+        print(f"❌ Failed to store: {tracking_data}")
         # Fallback to old system if new table doesn't exist
         store_sent_news_article_fallback(user_client, article, company_name, user_id)
 
