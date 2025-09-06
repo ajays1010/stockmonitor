@@ -53,44 +53,47 @@ def check_news_already_sent(user_client, article: Dict, company_name: str, user_
             else:
                 article_id = hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:16]
         
-        # Check if this article has been processed for this company (no time limit - permanent duplicate prevention)
-        
-        # First check by article_id and company
-        result = user_client.table('processed_news_articles')\
-            .select('id, sent_to_users')\
-            .eq('article_id', article_id)\
-            .eq('stock_query', company_name)\
-            .execute()
-        
-        if len(result.data) > 0:
-            # Check if this specific user already received this article
-            for record in result.data:
-                sent_users = record.get('sent_to_users', [])
-                # If sent_to_users is None or empty, treat as not sent to anyone yet
-                if not sent_users:
-                    sent_users = []
-                
-                # Check if current user already received this article
-                if user_id in sent_users:
-                    if os.environ.get('BSE_VERBOSE', '0') == '1':
-                        print(f"NEWS: User {user_id[:8]}... already received article_id: {article_id[:8]}... for {company_name}")
-                    return True
+        # Check if article exists (with created_at column support)
+        try:
+            # Try with created_at column (if it exists)
+            cutoff_date = datetime.now() - timedelta(days=7)  # 7-day duplicate window
+            result = user_client.table('processed_news_articles')\
+                .select('id, created_at')\
+                .eq('article_id', article_id)\
+                .eq('stock_query', company_name)\
+                .gte('created_at', cutoff_date.isoformat())\
+                .execute()
             
-            # Article exists but user hasn't received it yet
-            if os.environ.get('BSE_VERBOSE', '0') == '1':
-                print(f"NEWS: Article exists but user {user_id[:8]}... hasn't received it yet: {article_id[:8]}...")
-            return False
+            if len(result.data) > 0:
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"NEWS: 🚫 DUPLICATE (7-day window) - Article {article_id[:8]}... for {company_name}")
+                return True
+                
+        except Exception:
+            # Fallback: created_at column doesn't exist, use simple global check
+            result = user_client.table('processed_news_articles')\
+                .select('id')\
+                .eq('article_id', article_id)\
+                .eq('stock_query', company_name)\
+                .execute()
+            
+            if len(result.data) > 0:
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"NEWS: 🚫 GLOBAL DUPLICATE - Article {article_id[:8]}... already sent for {company_name}")
+                return True
+        
+        if os.environ.get('BSE_VERBOSE', '0') == '1':
+            print(f"NEWS: ✅ NEW ARTICLE - {article_id[:8]}... for {company_name}")
+        return False
         
         # Also check by title similarity (for cases where URL might be different)
         title = article.get('title', '').strip()
         if title and len(title) > 20:
-            # Check for similar titles in the last 3 days
-            title_cutoff = datetime.now() - timedelta(days=3)
+            # Check for similar titles (no time limit to ensure permanent duplicate prevention)
             
             result = user_client.table('processed_news_articles')\
                 .select('id, title')\
                 .eq('stock_query', company_name)\
-                .gte('created_at', title_cutoff.isoformat())\
                 .execute()
             
             for record in result.data:
@@ -184,6 +187,20 @@ def store_sent_news_article(user_client, article: Dict, company_name: str, user_
             
             # Insert into database
             user_client.table('processed_news_articles').insert(article_data).execute()
+            
+            # Optional: Cleanup old records (if created_at column exists)
+            try:
+                cleanup_cutoff = datetime.now() - timedelta(days=30)  # Keep only last 30 days
+                user_client.table('processed_news_articles')\
+                    .delete()\
+                    .lt('created_at', cleanup_cutoff.isoformat())\
+                    .execute()
+                    
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"NEWS: Cleaned up old records older than 30 days")
+            except Exception:
+                # Cleanup failed (probably no created_at column yet)
+                pass
         
     except Exception as e:
         if os.environ.get('BSE_VERBOSE', '0') == '1':
@@ -1099,19 +1116,13 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
             # Filter out articles that have already been sent (IMPROVED DUPLICATE CHECK)
             new_articles = []
             for article in articles:
-                # Check both by article ID and by user_id + company combination
+                # Simple global duplicate check - if article was ever sent for this company, skip it
                 if not check_news_already_sent(user_client, article, company_name, user_id):
-                    # Additional check: has this specific user received this article?
-                    if not news_monitor._check_user_already_received_article(user_client, article, company_name, user_id):
-                        new_articles.append(article)
-                    else:
-                        if os.environ.get('BSE_VERBOSE', '0') == '1':
-                            title = article.get('title', 'Unknown')[:50]
-                            print(f"NEWS: User already received this article: {title}")
+                    new_articles.append(article)
                 else:
                     if os.environ.get('BSE_VERBOSE', '0') == '1':
                         title = article.get('title', 'Unknown')[:50]
-                        print(f"NEWS: Skipping already sent article: {title}")
+                        print(f"NEWS: 🚫 SKIPPING DUPLICATE: {title}")
             
             if not new_articles:
                 if os.environ.get('BSE_VERBOSE', '0') == '1':
