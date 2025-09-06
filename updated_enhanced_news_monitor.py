@@ -35,7 +35,7 @@ try:
 except ImportError:
     AI_DEDUPLICATION_AVAILABLE = False
 
-def check_news_already_sent(user_client, article: Dict, company_name: str) -> bool:
+def check_news_already_sent(user_client, article: Dict, company_name: str, user_id: str = None) -> bool:
     """
     Check if news article has already been sent for this company
     Returns True if already sent, False if new
@@ -53,20 +53,33 @@ def check_news_already_sent(user_client, article: Dict, company_name: str) -> bo
             else:
                 article_id = hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:16]
         
-        # Check if this article has been processed for this company in the last 48 hours (longer window for better duplicate detection)
-        cutoff_date = datetime.now() - timedelta(hours=48)
+        # Check if this article has been processed for this company (no time limit - permanent duplicate prevention)
         
         # First check by article_id and company
         result = user_client.table('processed_news_articles')\
-            .select('id')\
+            .select('id, sent_to_users')\
             .eq('article_id', article_id)\
             .eq('stock_query', company_name)\
             .execute()
         
         if len(result.data) > 0:
+            # Check if this specific user already received this article
+            for record in result.data:
+                sent_users = record.get('sent_to_users', [])
+                # If sent_to_users is None or empty, treat as not sent to anyone yet
+                if not sent_users:
+                    sent_users = []
+                
+                # Check if current user already received this article
+                if user_id in sent_users:
+                    if os.environ.get('BSE_VERBOSE', '0') == '1':
+                        print(f"NEWS: User {user_id[:8]}... already received article_id: {article_id[:8]}... for {company_name}")
+                    return True
+            
+            # Article exists but user hasn't received it yet
             if os.environ.get('BSE_VERBOSE', '0') == '1':
-                print(f"NEWS: Duplicate found by article_id: {article_id[:8]}... for {company_name}")
-            return True
+                print(f"NEWS: Article exists but user {user_id[:8]}... hasn't received it yet: {article_id[:8]}...")
+            return False
         
         # Also check by title similarity (for cases where URL might be different)
         title = article.get('title', '').strip()
@@ -142,12 +155,21 @@ def store_sent_news_article(user_client, article: Dict, company_name: str, user_
             # Article exists, update sent_to_users array
             existing_record = existing_result.data[0]
             existing_users = existing_record.get('sent_to_users', [])
+            if not existing_users:
+                existing_users = []
+            
             if user_id not in existing_users:
                 existing_users.append(user_id)
                 user_client.table('processed_news_articles')\
                     .update({'sent_to_users': existing_users})\
                     .eq('id', existing_record['id'])\
                     .execute()
+                
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"NEWS: Updated sent_to_users for article {article_id[:8]}... (now sent to {len(existing_users)} users)")
+            else:
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"NEWS: User {user_id[:8]}... already in sent_to_users for article {article_id[:8]}...")
         else:
             # New article, create record
             article_data = {
@@ -1078,7 +1100,7 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
             new_articles = []
             for article in articles:
                 # Check both by article ID and by user_id + company combination
-                if not check_news_already_sent(user_client, article, company_name):
+                if not check_news_already_sent(user_client, article, company_name, user_id):
                     # Additional check: has this specific user received this article?
                     if not news_monitor._check_user_already_received_article(user_client, article, company_name, user_id):
                         new_articles.append(article)
@@ -1132,9 +1154,12 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
                 except Exception as e:
                     print(f"NEWS: Error sending to {user_name}: {e}")
             
-            # Store the sent articles to prevent duplicates in future
+            # Store the sent articles to prevent duplicates in future (BEFORE sending to prevent race conditions)
             for article in new_articles:
                 store_sent_news_article(user_client, article, company_name, user_id)
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    title = article.get('title', 'Unknown')[:50]
+                    print(f"NEWS: Stored article to prevent duplicates: {title}...")
         
         if os.environ.get('BSE_VERBOSE', '0') == '1':
             print(f"NEWS: Enhanced alerts completed. Messages sent: {messages_sent}")
