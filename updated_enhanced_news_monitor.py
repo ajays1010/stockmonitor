@@ -1066,15 +1066,27 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
     
     # RACE CONDITION PROTECTION: Check if already running for this user
     import threading
+    import time
+    
     if not hasattr(enhanced_send_news_alerts, '_running_users'):
-        enhanced_send_news_alerts._running_users = set()
+        enhanced_send_news_alerts._running_users = {}
     
+    current_time = time.time()
+    
+    # Check if user is currently being processed
     if user_id in enhanced_send_news_alerts._running_users:
-        print(f"🚫 NEWS MONITORING ALREADY RUNNING FOR USER {user_id} - SKIPPING TO PREVENT DUPLICATES")
-        return 0
+        last_run_time = enhanced_send_news_alerts._running_users[user_id]
+        time_diff = current_time - last_run_time
+        
+        if time_diff < 300:  # 5 minutes
+            print(f"🚫 NEWS MONITORING ALREADY RUNNING FOR USER {user_id} - LAST RUN {time_diff:.0f}s AGO - SKIPPING")
+            return 0
+        else:
+            print(f"⚠️ Previous run was {time_diff:.0f}s ago, proceeding...")
     
-    # Mark user as being processed
-    enhanced_send_news_alerts._running_users.add(user_id)
+    # Mark user as being processed with timestamp
+    enhanced_send_news_alerts._running_users[user_id] = current_time
+    print(f"🔒 LOCKED USER {user_id} for news processing at {current_time}")
     
     try:
         # FORCE LOGGING TO IDENTIFY WHICH SYSTEM IS RUNNING
@@ -1115,14 +1127,54 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
             
             # Filter out articles that have already been sent (IMPROVED DUPLICATE CHECK)
             new_articles = []
+            
+            # Global article processing lock to prevent race conditions
+            if not hasattr(enhanced_send_news_alerts, '_processing_articles'):
+                enhanced_send_news_alerts._processing_articles = set()
+            
             for article in articles:
-                # Simple global duplicate check - if article was ever sent for this company, skip it
-                if not check_news_already_sent(user_client, article, company_name, user_id):
-                    new_articles.append(article)
-                else:
+                # Generate article ID for locking
+                article_id = article.get('article_id', '')
+                if not article_id:
+                    url = article.get('link', article.get('url', ''))
+                    title = article.get('title', '')
+                    if url:
+                        article_id = hashlib.md5(url.encode()).hexdigest()[:16]
+                    elif title:
+                        article_id = hashlib.md5(title.encode()).hexdigest()[:16]
+                
+                # Check if this article is currently being processed
+                article_lock_key = f"{article_id}_{company_name}"
+                if article_lock_key in enhanced_send_news_alerts._processing_articles:
                     if os.environ.get('BSE_VERBOSE', '0') == '1':
                         title = article.get('title', 'Unknown')[:50]
-                        print(f"NEWS: 🚫 SKIPPING DUPLICATE: {title}")
+                        print(f"NEWS: 🔒 ARTICLE LOCKED - Currently being processed: {title}")
+                    continue
+                
+                # Lock this article for processing
+                enhanced_send_news_alerts._processing_articles.add(article_lock_key)
+                
+                try:
+                    # Use simple tracking system for bulletproof duplicate prevention
+                    try:
+                        from simple_news_tracker import check_news_sent_simple
+                        is_duplicate = check_news_sent_simple(user_client, article, company_name, user_id)
+                    except ImportError:
+                        # Fallback to old system if simple tracker not available
+                        is_duplicate = check_news_already_sent(user_client, article, company_name, user_id)
+                    
+                    if not is_duplicate:
+                        new_articles.append(article)
+                        if os.environ.get('BSE_VERBOSE', '0') == '1':
+                            title = article.get('title', 'Unknown')[:50]
+                            print(f"NEWS: ✅ PROCESSING NEW ARTICLE: {title}")
+                    else:
+                        if os.environ.get('BSE_VERBOSE', '0') == '1':
+                            title = article.get('title', 'Unknown')[:50]
+                            print(f"NEWS: 🚫 SKIPPING DUPLICATE: {title}")
+                finally:
+                    # Always unlock the article after checking
+                    enhanced_send_news_alerts._processing_articles.discard(article_lock_key)
             
             if not new_articles:
                 if os.environ.get('BSE_VERBOSE', '0') == '1':
@@ -1167,7 +1219,19 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
             
             # Store the sent articles to prevent duplicates in future (BEFORE sending to prevent race conditions)
             for article in new_articles:
-                store_sent_news_article(user_client, article, company_name, user_id)
+                try:
+                    from simple_news_tracker import store_news_sent_simple, cleanup_old_tracking_records
+                    store_news_sent_simple(user_client, article, company_name, user_id)
+                    
+                    # Cleanup old records occasionally (every 10th run)
+                    import random
+                    if random.randint(1, 10) == 1:
+                        cleanup_old_tracking_records(user_client, days_to_keep=7)
+                        
+                except ImportError:
+                    # Fallback to old system
+                    store_sent_news_article(user_client, article, company_name, user_id)
+                
                 if os.environ.get('BSE_VERBOSE', '0') == '1':
                     title = article.get('title', 'Unknown')[:50]
                     print(f"NEWS: Stored article to prevent duplicates: {title}...")
@@ -1183,8 +1247,10 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
     finally:
         # ALWAYS remove user from running set to prevent permanent blocking
         if hasattr(enhanced_send_news_alerts, '_running_users'):
-            enhanced_send_news_alerts._running_users.discard(user_id)
-            if os.environ.get('BSE_VERBOSE', '0') == '1':
-                print(f"NEWS: Removed user {user_id} from running set")
+            if user_id in enhanced_send_news_alerts._running_users:
+                del enhanced_send_news_alerts._running_users[user_id]
+                print(f"🔓 UNLOCKED USER {user_id} from news processing")
+            else:
+                print(f"⚠️ USER {user_id} was not in running set during cleanup")
     
     return messages_sent
