@@ -1064,29 +1064,23 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
     """Send enhanced news alerts to Telegram recipients"""
     messages_sent = 0
     
-    # RACE CONDITION PROTECTION: Check if already running for this user
-    import threading
-    import time
+    # Import bulletproof tracker
+    try:
+        from bulletproof_news_tracker import (
+            is_user_locked, lock_user, unlock_user, 
+            is_article_duplicate, mark_article_sent, 
+            cleanup_cache, get_debug_stats
+        )
+        print(f"✅ BULLETPROOF TRACKER LOADED")
+    except ImportError as e:
+        print(f"❌ BULLETPROOF TRACKER FAILED TO LOAD: {e}")
+        return 0
     
-    if not hasattr(enhanced_send_news_alerts, '_running_users'):
-        enhanced_send_news_alerts._running_users = {}
+    # BULLETPROOF USER LOCK
+    if is_user_locked(user_id):
+        return 0
     
-    current_time = time.time()
-    
-    # Check if user is currently being processed
-    if user_id in enhanced_send_news_alerts._running_users:
-        last_run_time = enhanced_send_news_alerts._running_users[user_id]
-        time_diff = current_time - last_run_time
-        
-        if time_diff < 300:  # 5 minutes
-            print(f"🚫 NEWS MONITORING ALREADY RUNNING FOR USER {user_id} - LAST RUN {time_diff:.0f}s AGO - SKIPPING")
-            return 0
-        else:
-            print(f"⚠️ Previous run was {time_diff:.0f}s ago, proceeding...")
-    
-    # Mark user as being processed with timestamp
-    enhanced_send_news_alerts._running_users[user_id] = current_time
-    print(f"🔒 LOCKED USER {user_id} for news processing at {current_time}")
+    lock_user(user_id)
     
     try:
         # FORCE LOGGING TO IDENTIFY WHICH SYSTEM IS RUNNING
@@ -1155,23 +1149,16 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
                 enhanced_send_news_alerts._processing_articles.add(article_lock_key)
                 
                 try:
-                    # Use simple tracking system for bulletproof duplicate prevention
-                    try:
-                        from simple_news_tracker import check_news_sent_simple
-                        is_duplicate = check_news_sent_simple(user_client, article, company_name, user_id)
-                    except ImportError:
-                        # Fallback to old system if simple tracker not available
-                        is_duplicate = check_news_already_sent(user_client, article, company_name, user_id)
+                    # Use bulletproof duplicate checking
+                    is_duplicate = is_article_duplicate(user_client, article, company_name, user_id)
                     
                     if not is_duplicate:
                         new_articles.append(article)
-                        if os.environ.get('BSE_VERBOSE', '0') == '1':
-                            title = article.get('title', 'Unknown')[:50]
-                            print(f"NEWS: ✅ PROCESSING NEW ARTICLE: {title}")
+                        title = article.get('title', 'Unknown')[:50]
+                        print(f"NEWS: ✅ PROCESSING NEW ARTICLE: {title}")
                     else:
-                        if os.environ.get('BSE_VERBOSE', '0') == '1':
-                            title = article.get('title', 'Unknown')[:50]
-                            print(f"NEWS: 🚫 SKIPPING DUPLICATE: {title}")
+                        title = article.get('title', 'Unknown')[:50]
+                        print(f"NEWS: 🚫 SKIPPING DUPLICATE: {title}")
                 finally:
                     # Always unlock the article after checking
                     enhanced_send_news_alerts._processing_articles.discard(article_lock_key)
@@ -1219,22 +1206,14 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
             
             # Store the sent articles to prevent duplicates in future (BEFORE sending to prevent race conditions)
             for article in new_articles:
-                try:
-                    from simple_news_tracker import store_news_sent_simple, cleanup_old_tracking_records
-                    store_news_sent_simple(user_client, article, company_name, user_id)
-                    
-                    # Cleanup old records occasionally (every 10th run)
-                    import random
-                    if random.randint(1, 10) == 1:
-                        cleanup_old_tracking_records(user_client, days_to_keep=7)
-                        
-                except ImportError:
-                    # Fallback to old system
-                    store_sent_news_article(user_client, article, company_name, user_id)
-                
-                if os.environ.get('BSE_VERBOSE', '0') == '1':
-                    title = article.get('title', 'Unknown')[:50]
-                    print(f"NEWS: Stored article to prevent duplicates: {title}...")
+                mark_article_sent(user_client, article, company_name, user_id)
+                title = article.get('title', 'Unknown')[:50]
+                print(f"NEWS: Stored article to prevent duplicates: {title}...")
+            
+            # Cleanup old cache entries occasionally
+            import random
+            if random.randint(1, 10) == 1:
+                cleanup_cache()
         
         if os.environ.get('BSE_VERBOSE', '0') == '1':
             print(f"NEWS: Enhanced alerts completed. Messages sent: {messages_sent}")
@@ -1245,12 +1224,14 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
             import traceback
             traceback.print_exc()
     finally:
-        # ALWAYS remove user from running set to prevent permanent blocking
-        if hasattr(enhanced_send_news_alerts, '_running_users'):
-            if user_id in enhanced_send_news_alerts._running_users:
-                del enhanced_send_news_alerts._running_users[user_id]
-                print(f"🔓 UNLOCKED USER {user_id} from news processing")
-            else:
-                print(f"⚠️ USER {user_id} was not in running set during cleanup")
+        # ALWAYS unlock user
+        unlock_user(user_id)
+        
+        # Print debug stats
+        try:
+            stats = get_debug_stats()
+            print(f"📊 DEBUG STATS: {stats}")
+        except:
+            pass
     
     return messages_sent
