@@ -60,7 +60,7 @@ def mark_rss_sent_in_memory(article_hash: str):
     _RSS_SENT_CACHE[article_hash] = time.time()
 
 def is_rss_duplicate_in_database(user_client, article: Dict, company_name: str, user_id: str) -> bool:
-    """Check if RSS article was already sent using existing database tables"""
+    """Check if RSS article was already sent using news_sent_tracking table"""
     try:
         # Generate article ID
         url = article.get('link', article.get('url', ''))
@@ -73,45 +73,61 @@ def is_rss_duplicate_in_database(user_client, article: Dict, company_name: str, 
         else:
             return False
         
-        # Check in processed_news_articles table (if exists)
+        # Check in news_sent_tracking table (primary method)
         try:
             cutoff_date = datetime.now() - timedelta(hours=24)  # 24-hour duplicate window
-            result = user_client.table('processed_news_articles').select('id').eq(
+            result = user_client.table('news_sent_tracking').select('id').eq(
                 'article_id', article_id
-            ).eq('stock_query', company_name).gte(
-                'created_at', cutoff_date.isoformat()
+            ).eq('user_id', user_id).eq('company_name', company_name).gte(
+                'sent_at', cutoff_date.isoformat()
             ).execute()
             
             if result.data:
-                logger.debug(f"RSS duplicate found in processed_news_articles: {article_id}")
+                logger.debug(f"RSS duplicate found in news_sent_tracking: {article_id}")
                 return True
                 
-        except Exception:
-            # Table might not exist or have created_at column, try simple check
+        except Exception as e:
+            logger.warning(f"Failed to check news_sent_tracking: {e}")
+            
+            # Fallback to processed_news_articles table
             try:
+                cutoff_date = datetime.now() - timedelta(hours=24)  # 24-hour duplicate window
                 result = user_client.table('processed_news_articles').select('id').eq(
                     'article_id', article_id
-                ).eq('stock_query', company_name).execute()
+                ).eq('stock_query', company_name).gte(
+                    'created_at', cutoff_date.isoformat()
+                ).execute()
                 
                 if result.data:
-                    logger.debug(f"RSS duplicate found (simple check): {article_id}")
+                    logger.debug(f"RSS duplicate found in processed_news_articles: {article_id}")
                     return True
+                    
+            except Exception:
+                # Table might not exist or have created_at column, try simple check
+                try:
+                    result = user_client.table('processed_news_articles').select('id').eq(
+                        'article_id', article_id
+                    ).eq('stock_query', company_name).execute()
+                    
+                    if result.data:
+                        logger.debug(f"RSS duplicate found (simple check): {article_id}")
+                        return True
+                except Exception:
+                    pass
+            
+            # Final fallback to simple_news_tracking table
+            try:
+                article_hash = hashlib.md5(f"{title}_{company_name}".encode()).hexdigest()
+                result = user_client.table('simple_news_tracking').select('id').eq(
+                    'article_hash', article_hash
+                ).eq('user_id', user_id).eq('company_name', company_name).execute()
+                
+                if result.data:
+                    logger.debug(f"RSS duplicate found in simple_news_tracking: {article_hash}")
+                    return True
+                    
             except Exception:
                 pass
-        
-        # Check in simple_news_tracking table (if exists)
-        try:
-            article_hash = hashlib.md5(f"{title}_{company_name}".encode()).hexdigest()
-            result = user_client.table('simple_news_tracking').select('id').eq(
-                'article_hash', article_hash
-            ).eq('user_id', user_id).eq('company_name', company_name).execute()
-            
-            if result.data:
-                logger.debug(f"RSS duplicate found in simple_news_tracking: {article_hash}")
-                return True
-                
-        except Exception:
-            pass
         
         return False
         
@@ -120,7 +136,7 @@ def is_rss_duplicate_in_database(user_client, article: Dict, company_name: str, 
         return False
 
 def record_rss_sent_in_database(user_client, article: Dict, company_name: str, user_id: str):
-    """Record RSS article as sent using existing database tables"""
+    """Record RSS article as sent using news_sent_tracking table"""
     try:
         # Generate article ID
         url = article.get('link', article.get('url', ''))
@@ -133,37 +149,56 @@ def record_rss_sent_in_database(user_client, article: Dict, company_name: str, u
         else:
             return
         
-        # Try to record in processed_news_articles table
+        # Record in news_sent_tracking table (primary method)
         try:
-            article_data = {
+            tracking_data = {
                 'article_id': article_id,
-                'title': title[:255] if title else '',
-                'url': url[:500] if url else '',
-                'source_name': (article.get('source') or article.get('source_name', ''))[:100],
-                'pub_date': article.get('pubDate', article.get('published_at', ''))[:50],
-                'stock_query': company_name,
-                'sent_to_users': [user_id]
+                'article_title': title[:500] if title else '',
+                'article_url': url[:1000] if url else '',
+                'company_name': company_name[:200],
+                'user_id': user_id,
+                'recipient_id': 'all_recipients',  # Will be updated per recipient later
+                'source': 'rss',
+                'sent_at': datetime.utcnow().isoformat()
             }
             
-            user_client.table('processed_news_articles').insert(article_data).execute()
-            logger.debug(f"Recorded RSS article in processed_news_articles: {article_id}")
+            user_client.table('news_sent_tracking').insert(tracking_data).execute()
+            logger.debug(f"Recorded RSS article in news_sent_tracking: {article_id}")
             
-        except Exception:
-            # Try simple_news_tracking table as fallback
+        except Exception as e:
+            logger.warning(f"Failed to record in news_sent_tracking: {e}")
+            
+            # Fallback to processed_news_articles table
             try:
-                article_hash = hashlib.md5(f"{title}_{company_name}".encode()).hexdigest()
-                simple_data = {
-                    'article_hash': article_hash,
-                    'user_id': user_id,
-                    'company_name': company_name,
-                    'article_title': title[:500] if title else ''
+                article_data = {
+                    'article_id': article_id,
+                    'title': title[:255] if title else '',
+                    'url': url[:500] if url else '',
+                    'source_name': (article.get('source') or article.get('source_name', ''))[:100],
+                    'pub_date': article.get('pubDate', article.get('published_at', ''))[:50],
+                    'stock_query': company_name,
+                    'sent_to_users': [user_id]
                 }
                 
-                user_client.table('simple_news_tracking').insert(simple_data).execute()
-                logger.debug(f"Recorded RSS article in simple_news_tracking: {article_hash}")
+                user_client.table('processed_news_articles').insert(article_data).execute()
+                logger.debug(f"Recorded RSS article in processed_news_articles: {article_id}")
                 
-            except Exception as e:
-                logger.warning(f"Could not record RSS article in any table: {e}")
+            except Exception:
+                # Final fallback to simple_news_tracking table
+                try:
+                    article_hash = hashlib.md5(f"{title}_{company_name}".encode()).hexdigest()
+                    simple_data = {
+                        'article_hash': article_hash,
+                        'user_id': user_id,
+                        'company_name': company_name,
+                        'article_title': title[:500] if title else ''
+                    }
+                    
+                    user_client.table('simple_news_tracking').insert(simple_data).execute()
+                    logger.debug(f"Recorded RSS article in simple_news_tracking: {article_hash}")
+                    
+                except Exception as e:
+                    logger.warning(f"Could not record RSS article in any table: {e}")
         
     except Exception as e:
         logger.error(f"Error recording RSS article: {e}")
