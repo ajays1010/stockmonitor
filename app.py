@@ -438,8 +438,8 @@ def cron_master():
                             print(f"🔍 PRICE SPIKE: Market open: {is_open} (Current time in IST)")
                             
                             if is_open:
-                                # Lower thresholds for better detection: 2% price change, 200% volume spike
-                                sent = db.send_hourly_spike_alerts(sb, uid, scrips, recipients, price_threshold_pct=2.0, volume_threshold_pct=200.0)
+                                # Lower thresholds for better detection: 5% price change, 300% volume spike
+                                sent = db.send_hourly_spike_alerts(sb, uid, scrips, recipients, price_threshold_pct=5.0, volume_threshold_pct=300.0)
                                 print(f"🔍 PRICE SPIKE: Messages sent: {sent}")
                             else:
                                 print(f"🔍 PRICE SPIKE: Market closed, skipping alerts")
@@ -1339,6 +1339,7 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', os.environ.get('FLASK_RUN_PORT', 5000)))
     debug = os.environ.get('FLASK_DEBUG', '0') == '1'
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
 
 
