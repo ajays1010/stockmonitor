@@ -980,7 +980,7 @@ def ist_market_window(now=None):
     """
     if now is None:
         now = ist_now()
-    open_dt = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    open_dt = now.replace(hour=9, minute=16, second=0, microsecond=0)
     close_dt = now.replace(hour=15, minute=30, second=0, microsecond=0)
     return (open_dt <= now <= close_dt), open_dt, close_dt
 
@@ -1723,3 +1723,4 @@ def send_script_messages_to_telegram(user_client, user_id: str, monitored_scrips
     except Exception as e:
         print(f"Error in send_script_messages_to_telegram: {e}")
         raise e
+
