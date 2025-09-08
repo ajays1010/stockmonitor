@@ -217,6 +217,12 @@ def cron_master():
     key = request.args.get('key')
     # Support both environment variable and hardcoded key for UptimeRobot compatibility
     expected = os.environ.get('CRON_SECRET_KEY', 'c78b684067c74784364e352c391ecad3')
+    
+    # DEBUG: Log who's calling the cron endpoint
+    caller_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.environ.get('REMOTE_ADDR', 'unknown'))
+    user_agent = request.environ.get('HTTP_USER_AGENT', 'unknown')
+    print(f"🔍 CRON CALL: IP={caller_ip}, User-Agent={user_agent}, Time={datetime.now().isoformat()}")
+    
     if not expected or key != expected:
         return jsonify({
             "status": "unauthorized",
@@ -432,15 +438,36 @@ def cron_master():
                         job_result['users_skipped'] += 1
                         continue
                     
-                    # SPECIAL HANDLING FOR DAILY SUMMARY - prevent multiple sends to same user in one run
+                    # SPECIAL HANDLING FOR DAILY SUMMARY - prevent multiple sends per day using database
                     if job_name == 'daily_summary':
-                        if uid in daily_summary_sent_users:
-                            # Skip this user - already sent daily summary in this run
-                            job_result['users_skipped'] += 1
-                            continue
-                        else:
-                            # Mark user as processed for daily summary
-                            daily_summary_sent_users.add(uid)
+                        # Check if daily summary already sent today for this user
+                        today_date = now_ist.strftime('%Y-%m-%d')
+                        try:
+                            existing_summary = sb.table('cron_run_logs').select('id').eq(
+                                'user_id', uid
+                            ).eq('job_name', 'daily_summary').gte(
+                                'created_at', f'{today_date}T00:00:00+05:30'
+                            ).lt(
+                                'created_at', f'{today_date}T23:59:59+05:30'
+                            ).execute()
+                            
+                            if existing_summary.data:
+                                # Already sent daily summary today - skip
+                                job_result['users_skipped'] += 1
+                                print(f"📊 DAILY SUMMARY: Skipping user {uid[:8]} - already sent today")
+                                continue
+                            else:
+                                # Mark in memory tracking as well
+                                daily_summary_sent_users.add(uid)
+                                print(f"📊 DAILY SUMMARY: Processing user {uid[:8]} - first time today")
+                        except Exception as db_check_error:
+                            print(f"📊 DAILY SUMMARY: DB check failed for {uid[:8]}, proceeding: {db_check_error}")
+                            # If DB check fails, use memory tracking as fallback
+                            if uid in daily_summary_sent_users:
+                                job_result['users_skipped'] += 1
+                                continue
+                            else:
+                                daily_summary_sent_users.add(uid)
                     
                     try:
                         # Execute appropriate function based on job type
