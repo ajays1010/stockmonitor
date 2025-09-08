@@ -431,7 +431,19 @@ def cron_master():
                         if job_name == 'bse_announcements':
                             sent = db.send_bse_announcements_consolidated(sb, uid, scrips, recipients, hours_back=1)
                         elif job_name == 'live_price_monitoring':
-                            sent = db.send_hourly_spike_alerts(sb, uid, scrips, recipients)
+                            # Enhanced price spike alerts with debugging and lower thresholds
+                            print(f"🔍 PRICE SPIKE: Processing {len(scrips)} scrips for user {uid[:8]}...")
+                            from database import ist_market_window
+                            is_open, open_dt, close_dt = ist_market_window()
+                            print(f"🔍 PRICE SPIKE: Market open: {is_open} (Current time in IST)")
+                            
+                            if is_open:
+                                # Lower thresholds for better detection: 2% price change, 200% volume spike
+                                sent = db.send_hourly_spike_alerts(sb, uid, scrips, recipients, price_threshold_pct=2.0, volume_threshold_pct=200.0)
+                                print(f"🔍 PRICE SPIKE: Messages sent: {sent}")
+                            else:
+                                print(f"🔍 PRICE SPIKE: Market closed, skipping alerts")
+                                sent = 0
                         elif job_name == 'daily_summary':
                             sent = db.send_script_messages_to_telegram(sb, uid, scrips, recipients)
                         elif job_name == 'bulk_deals_monitoring':
@@ -439,9 +451,11 @@ def cron_master():
                             from bulk_deals_monitor import send_bulk_deals_alerts
                             sent = send_bulk_deals_alerts(sb, uid, scrips, recipients)
                         elif job_name == 'news_monitoring':
-                            # Import and use ENHANCED news monitoring (crisp summaries, today's news only)
-                            from updated_enhanced_news_monitor import enhanced_send_news_alerts
-                            sent = enhanced_send_news_alerts(sb, uid, scrips, recipients)
+                            # Import and use RSS news monitoring with duplicate prevention
+                            print(f"🔥 RSS NEWS: Starting duplicate-safe news monitoring for user {uid[:8]}...")
+                            from simple_rss_fix import send_rss_news_no_duplicates
+                            sent = send_rss_news_no_duplicates(sb, uid, scrips, recipients)
+                            print(f"🔥 RSS NEWS: Completed - {sent} messages sent")
                         else:
                             continue
                         
