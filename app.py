@@ -1350,56 +1350,8 @@ def get_sentiment_preferences(sb):
         return jsonify({'error': str(e)}), 500
 
 # --- Health Check ---
-@app.route('/health')
-def health():
-    return 'ok', 200
 
-# --- Health and Monitoring Endpoints ---
-@app.route('/health')
-def health_check():
-    """Health check endpoint for UptimeRobot monitoring - NO LOGIN REQUIRED"""
-    try:
-        # Test database connection
-        sb = db.get_supabase_client(service_role=True)
-        db_status = "connected" if sb else "disconnected"
-        
-        # Get basic system info
-        import psutil
-        cpu_percent = psutil.cpu_percent(interval=0.1)
-        memory = psutil.virtual_memory()
-        
-        return jsonify({
-            "status": "healthy",
-            "timestamp": datetime.now().isoformat(),
-            "database": db_status,
-            "system": {
-                "cpu_percent": cpu_percent,
-                "memory_percent": memory.percent,
-                "memory_available_gb": round(memory.available / (1024**3), 2)
-            },
-            "server": "stockmonitor-aknr",
-            "message": "Server is operational and ready"
-        }), 200
-    except ImportError:
-        # If psutil not available, return basic health
-        sb = db.get_supabase_client(service_role=True)
-        db_status = "connected" if sb else "disconnected"
-        
-        return jsonify({
-            "status": "healthy",
-            "timestamp": datetime.now().isoformat(),
-            "database": db_status,
-            "server": "stockmonitor-aknr",
-            "message": "Server is operational"
-        }), 200
-    except Exception as e:
-        return jsonify({
-            "status": "unhealthy",
-            "timestamp": datetime.now().isoformat(),
-            "error": str(e),
-            "server": "stockmonitor-aknr"
-        }), 500
-
+# --- Additional Monitoring Endpoints ---
 @app.route('/ping')
 def ping():
     """Simple ping endpoint for keep-alive monitoring - NO LOGIN REQUIRED"""
@@ -1420,58 +1372,6 @@ def uptime():
         "message": "Server is alive and preventing Render sleep",
         "purpose": "keep_alive"
     }), 200
-
-@app.route('/status')
-def status():
-    """Detailed status endpoint - NO LOGIN REQUIRED"""
-    try:
-        # Get database info
-        sb = db.get_supabase_client(service_role=True)
-        db_status = "connected" if sb else "disconnected"
-        
-        # Get recent cron activity
-        recent_activity = {}
-        if sb:
-            try:
-                # Check recent cron runs (last 24 hours)
-                from datetime import timedelta
-                yesterday = datetime.now() - timedelta(days=1)
-                cron_response = sb.table('cron_run_logs').select('*').gte(
-                    'created_at', yesterday.isoformat()
-                ).order('created_at', desc=True).limit(5).execute()
-                recent_activity['recent_cron_runs'] = len(cron_response.data)
-                recent_activity['last_cron'] = cron_response.data[0]['created_at'] if cron_response.data else 'None'
-                
-                # Check user count
-                users_response = sb.table('profiles').select('id', count='exact').execute()
-                recent_activity['total_users'] = getattr(users_response, 'count', 0)
-                
-            except Exception as e:
-                recent_activity['error'] = str(e)
-        
-        return jsonify({
-            "status": "operational",
-            "timestamp": datetime.now().isoformat(),
-            "server": "stockmonitor-aknr",
-            "database": db_status,
-            "activity": recent_activity,
-            "endpoints": {
-                "health": "/health",
-                "ping": "/ping",
-                "uptime": "/uptime",
-                "cron": "/cron/master?key=...",
-                "status": "/status"
-            },
-            "message": "All systems operational"
-        }), 200
-        
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "timestamp": datetime.now().isoformat(),
-            "error": str(e),
-            "server": "stockmonitor-aknr"
-        }), 500
 
 # --- Main Execution ---
 if __name__ == '__main__':
