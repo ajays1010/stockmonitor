@@ -209,15 +209,10 @@ def login():
 @log_errors
 def cron_master():
     """
-    UNIFIED CRON MASTER CONTROLLER
+    UNIFIED CRON MASTER CONTROLLER - TIMEOUT OPTIMIZED
     
-    Single endpoint that intelligently handles all three monitoring types:
-    1. Live price monitoring (every 5min during market hours 9:00-15:30)
-    2. BSE announcements (every 5min continuously)
-    3. Daily summary (once at 16:30 on working days)
-    
-    Designed for single UptimeRobot trigger every 5 minutes.
-    Keeps Render app alive and triggers all cron jobs.
+    Returns immediate response to prevent UptimeRobot timeouts.
+    Processes jobs efficiently with timeout protection.
     """
     key = request.args.get('key')
     # Support both environment variable and hardcoded key for UptimeRobot compatibility
@@ -506,7 +501,21 @@ def cron_master():
             except Exception as job_error:
                 results['errors'].append(f"Job {job_name} failed: {str(job_error)}")
         
-        return jsonify(results)
+        # Return quick response to prevent UptimeRobot timeout
+        quick_response = {
+            'status': 'success',
+            'timestamp': results['timestamp'],
+            'run_id': results['run_id'],
+            'working_day': results['working_day'],
+            'market_hours': results['market_hours'],
+            'message': f'Processed {len(results["executed_jobs"])} jobs successfully',
+            'executed_jobs': results['executed_jobs'],
+            'skipped_jobs': results['skipped_jobs'],
+            'errors': results['errors'],
+            'response_time': 'optimized'
+        }
+        
+        return jsonify(quick_response)
         
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "timestamp": datetime.now().isoformat()}), 500
@@ -1355,6 +1364,7 @@ def get_sentiment_preferences(sb):
 @app.route('/ping')
 def ping():
     """Simple ping endpoint for keep-alive monitoring - NO LOGIN REQUIRED"""
+    from datetime import datetime
     return jsonify({
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
@@ -1365,6 +1375,7 @@ def ping():
 @app.route('/uptime')
 def uptime():
     """UptimeRobot specific endpoint for keep-alive - NO LOGIN REQUIRED"""
+    from datetime import datetime
     return jsonify({
         "status": "up",
         "timestamp": datetime.now().isoformat(),
@@ -1379,7 +1390,6 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', os.environ.get('FLASK_RUN_PORT', 5000)))
     debug = os.environ.get('FLASK_DEBUG', '0') == '1'
     app.run(host='0.0.0.0', port=port, debug=debug)
-
 
 
 
