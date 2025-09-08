@@ -356,7 +356,7 @@ def cron_master():
                             
                             time_since_run = (now_ist - run_time_ist).total_seconds()
                             
-                            if time_since_run < 1800:  # 30 minutes instead of 2 hours
+                            if time_since_run < 7200:  # 2 hours - only one daily summary per day
                                 results['skipped_jobs'].append({
                                     'name': 'daily_summary',
                                     'reason': f'Already executed today at {run_time_ist.strftime("%H:%M")} ({time_since_run/60:.0f} min ago)'
@@ -393,7 +393,7 @@ def cron_master():
         
         # Get user data once
         scrip_rows = sb.table('monitored_scrips').select('user_id, bse_code, company_name').execute().data or []
-        rec_rows = sb.table('telegram_recipients').select('user_id, chat_id').execute().data or []
+        rec_rows = sb.table('telegram_recipients').select('user_id, chat_id, user_name').execute().data or []
         
         # Build maps by user
         scrips_by_user = {}
@@ -411,9 +411,14 @@ def cron_master():
             uid = r.get('user_id')
             if not uid:
                 continue
-            recs_by_user.setdefault(uid, []).append({'chat_id': r.get('chat_id')})
+            recs_by_user.setdefault(uid, []).append({
+                'chat_id': r.get('chat_id'),
+                'user_name': r.get('user_name', 'User')
+            })
         
         # Execute each job
+        daily_summary_sent_users = set()  # Track users who already received daily summary in this run
+        
         for job in jobs_to_run:
             job_name = job['name']
             job_result = {
@@ -431,6 +436,16 @@ def cron_master():
                     if not scrips or not recipients:
                         job_result['users_skipped'] += 1
                         continue
+                    
+                    # SPECIAL HANDLING FOR DAILY SUMMARY - prevent multiple sends to same user in one run
+                    if job_name == 'daily_summary':
+                        if uid in daily_summary_sent_users:
+                            # Skip this user - already sent daily summary in this run
+                            job_result['users_skipped'] += 1
+                            continue
+                        else:
+                            # Mark user as processed for daily summary
+                            daily_summary_sent_users.add(uid)
                     
                     try:
                         # Execute appropriate function based on job type
