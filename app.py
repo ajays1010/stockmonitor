@@ -219,6 +219,7 @@ def cron_master():
     expected = os.environ.get('CRON_SECRET_KEY', 'c78b684067c74784364e352c391ecad3')
     
     # DEBUG: Log who's calling the cron endpoint
+    from datetime import datetime
     caller_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.environ.get('REMOTE_ADDR', 'unknown'))
     user_agent = request.environ.get('HTTP_USER_AGENT', 'unknown')
     print(f"🔍 CRON CALL: IP={caller_ip}, User-Agent={user_agent}, Time={datetime.now().isoformat()}")
