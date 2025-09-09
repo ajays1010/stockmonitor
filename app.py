@@ -1388,7 +1388,7 @@ def get_sentiment_preferences(sb):
 
 # --- Health Check ---
 
-# --- Additional Monitoring Endpoints ---
+# --- Enhanced Monitoring Endpoints ---
 @app.route('/ping')
 def ping():
     """Simple ping endpoint for keep-alive monitoring - NO LOGIN REQUIRED"""
@@ -1411,6 +1411,145 @@ def uptime():
         "message": "Server is alive and preventing Render sleep",
         "purpose": "keep_alive"
     }), 200
+
+@app.route('/alive')
+def alive():
+    """Simple alive check with timestamp - detects if server is hung"""
+    import time
+    from datetime import datetime
+    
+    return jsonify({
+        "status": "alive",
+        "timestamp": datetime.now().isoformat(),
+        "unix_time": time.time(),
+        "server": "stockmonitor-aknr"
+    }), 200
+
+@app.route('/health-detailed')
+def health_detailed():
+    """Comprehensive health check with timeout detection"""
+    import time
+    from datetime import datetime
+    
+    start_time = time.time()
+    health_data = {
+        "status": "checking",
+        "timestamp": datetime.now().isoformat(),
+        "checks": {},
+        "server": "stockmonitor-aknr"
+    }
+    
+    # Test 1: Database connection
+    try:
+        sb = db.get_supabase_client(service_role=True)
+        if sb:
+            response = sb.table('profiles').select('id').limit(1).execute()
+            health_data["checks"]["database"] = "connected"
+        else:
+            health_data["checks"]["database"] = "failed"
+            
+    except Exception as e:
+        health_data["checks"]["database"] = f"error: {str(e)[:100]}"
+    
+    # Test 2: Memory usage
+    try:
+        import psutil
+        memory = psutil.virtual_memory()
+        health_data["checks"]["memory_percent"] = memory.percent
+        health_data["checks"]["memory_available_gb"] = round(memory.available / (1024**3), 2)
+        
+        if memory.percent > 90:
+            health_data["checks"]["memory_status"] = "critical"
+        elif memory.percent > 75:
+            health_data["checks"]["memory_status"] = "warning"
+        else:
+            health_data["checks"]["memory_status"] = "normal"
+            
+    except ImportError:
+        health_data["checks"]["memory"] = "psutil_not_available"
+    except Exception as e:
+        health_data["checks"]["memory"] = f"error: {str(e)}"
+    
+    # Test 3: Response time
+    response_time = time.time() - start_time
+    health_data["checks"]["response_time_seconds"] = round(response_time, 3)
+    
+    # Test 4: Last cron run
+    try:
+        sb = db.get_supabase_client(service_role=True)
+        if sb:
+            cron_response = sb.table('cron_run_logs').select('created_at').order(
+                'created_at', desc=True
+            ).limit(1).execute()
+            
+            if cron_response.data:
+                last_cron = cron_response.data[0]['created_at']
+                health_data["checks"]["last_cron_run"] = last_cron
+            else:
+                health_data["checks"]["last_cron_run"] = "no_records"
+    except Exception as e:
+        health_data["checks"]["last_cron_run"] = f"error: {str(e)[:50]}"
+    
+    # Overall status determination
+    if response_time > 10:
+        health_data["status"] = "slow_response"
+    elif health_data["checks"].get("database") != "connected":
+        health_data["status"] = "database_issue"
+    elif health_data["checks"].get("memory_percent", 0) > 90:
+        health_data["status"] = "memory_critical"
+    elif health_data["checks"].get("memory_percent", 0) > 75:
+        health_data["status"] = "memory_warning"
+    else:
+        health_data["status"] = "healthy"
+    
+    # Return appropriate HTTP status
+    if health_data["status"] in ["healthy", "memory_warning"]:
+        return jsonify(health_data), 200
+    else:
+        return jsonify(health_data), 503
+
+@app.route('/memory-status')
+def memory_status():
+    """Detailed memory monitoring"""
+    try:
+        import psutil
+        import gc
+        import os
+        from datetime import datetime
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # System memory
+        memory = psutil.virtual_memory()
+        
+        # Process memory
+        process = psutil.Process(os.getpid())
+        process_memory = process.memory_info()
+        
+        return jsonify({
+            "timestamp": datetime.now().isoformat(),
+            "system": {
+                "total_gb": round(memory.total / (1024**3), 2),
+                "available_gb": round(memory.available / (1024**3), 2),
+                "used_percent": memory.percent,
+                "status": "critical" if memory.percent > 90 else "warning" if memory.percent > 75 else "normal"
+            },
+            "process": {
+                "memory_mb": round(process_memory.rss / (1024**2), 2),
+                "memory_percent": round(process.memory_percent(), 2),
+                "threads": process.num_threads(),
+                "cpu_percent": process.cpu_percent()
+            },
+            "server": "stockmonitor-aknr"
+        }), 200
+        
+    except Exception as e:
+        from datetime import datetime
+        return jsonify({
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
 
 # --- Main Execution ---
 if __name__ == '__main__':
