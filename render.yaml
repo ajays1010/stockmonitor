@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -w 2 -k gthread -t 120 -b 0.0.0.0:$PORT app:app
+    startCommand: gunicorn -w 4 -k gevent --worker-connections 1000 -t 30 --max-requests 1000 --max-requests-jitter 50 --preload -b 0.0.0.0:$PORT app:app
     healthCheckPath: /health
     autoDeploy: true
     envVars:
@@ -85,6 +85,7 @@ services:
     envVars:
       - key: CRON_SECRET_KEY
         sync: false
+
 
 
 
