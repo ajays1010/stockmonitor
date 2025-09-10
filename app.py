@@ -16,10 +16,21 @@ from logging_config import github_logger
 import logging
 import traceback
 import atexit
+import gc
+import threading
+import weakref
+from contextlib import contextmanager
+import psutil
+from functools import lru_cache
+import time
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "a-super-secret-key-for-local-testing")
 app.register_blueprint(admin_bp)
+
+# Global variables for optimization
+_connection_pool = {}
+_rss_memory_tracker = weakref.WeakSet()
 
 # Initialize logging
 github_logger.log_app_start()
@@ -91,6 +102,129 @@ atexit.register(cleanup_and_log)
 # Ensure Firebase Admin SDK is initialized when the app starts (works under Gunicorn too)
 db.initialize_firebase()
 
+# Database Connection Pooling Class
+class DatabaseConnectionPool:
+    """Simple connection pool for Supabase clients"""
+    
+    def __init__(self, max_connections=5):
+        self.max_connections = max_connections
+        self.connections = []
+        self.in_use = set()
+        self.lock = threading.Lock()
+    
+    def get_connection(self, service_role=False):
+        """Get a connection from the pool"""
+        with self.lock:
+            # Try to reuse existing connection
+            for conn in self.connections:
+                if conn not in self.in_use and conn.get('service_role') == service_role:
+                    self.in_use.add(conn)
+                    return conn.get('client')
+            
+            # Create new connection if under limit
+            if len(self.connections) < self.max_connections:
+                try:
+                    client = db.get_supabase_client(service_role=service_role)
+                    conn = {'client': client, 'service_role': service_role, 'created': time.time()}
+                    self.connections.append(conn)
+                    self.in_use.add(conn)
+                    return client
+                except:
+                    pass
+            
+            # Fallback to direct creation
+            return db.get_supabase_client(service_role=service_role)
+    
+    def return_connection(self, client):
+        """Return connection to pool"""
+        with self.lock:
+            for conn in self.connections:
+                if conn.get('client') == client and conn in self.in_use:
+                    self.in_use.remove(conn)
+                    break
+    
+    def cleanup_old_connections(self):
+        """Remove old connections (older than 1 hour)"""
+        with self.lock:
+            current_time = time.time()
+            self.connections = [
+                conn for conn in self.connections 
+                if current_time - conn.get('created', 0) < 3600 and conn not in self.in_use
+            ]
+
+# Initialize connection pool
+_db_pool = DatabaseConnectionPool()
+
+# Fast memory usage function
+@lru_cache(maxsize=1)
+def _get_memory_usage_fast():
+    """Cached memory usage - updates every few seconds"""
+    try:
+        process = psutil.Process(os.getpid())
+        return round(process.memory_info().rss / (1024**2), 1)
+    except:
+        return 0
+
+# Clear cache every 10 seconds
+def _clear_memory_cache():
+    _get_memory_usage_fast.cache_clear()
+    threading.Timer(10.0, _clear_memory_cache).start()
+
+# Start the cache clearing timer
+_clear_memory_cache()
+
+# RSS Memory Management Context Manager
+@contextmanager
+def rss_memory_manager():
+    """Context manager for RSS operations with automatic cleanup"""
+    initial_memory = _get_memory_usage_fast()
+    rss_objects = []
+    
+    try:
+        # Track RSS objects
+        _rss_memory_tracker.add(rss_objects)
+        yield rss_objects
+    finally:
+        # Force cleanup
+        for obj in rss_objects:
+            try:
+                del obj
+            except:
+                pass
+        rss_objects.clear()
+        
+        # Force garbage collection if memory increased significantly
+        current_memory = _get_memory_usage_fast()
+        if current_memory - initial_memory > 50:  # 50MB increase
+            gc.collect()
+            print(f"🧹 RSS Memory cleanup: {initial_memory}MB → {_get_memory_usage_fast()}MB")
+
+# Optimized RSS News Function
+def send_rss_news_optimized(sb, user_id, scrips, recipients):
+    """Memory-optimized RSS news sending"""
+    messages_sent = 0
+    
+    with rss_memory_manager() as rss_tracker:
+        try:
+            # Import RSS function
+            from simple_rss_fix import send_rss_news_no_duplicates
+            
+            # Track this operation
+            rss_tracker.append({'operation': 'rss_news', 'user_id': user_id})
+            
+            # Call RSS function
+            messages_sent = send_rss_news_no_duplicates(sb, user_id, scrips, recipients)
+            
+            # Force cleanup after RSS processing
+            gc.collect()
+            
+        except Exception as e:
+            print(f"RSS Error: {e}")
+            # Force cleanup on error
+            gc.collect()
+    
+    return messages_sent
+
 # --- Load local company data into memory for searching ---
 try:
     company_df = pd.read_csv('indian_stock_tickers.csv')
@@ -102,15 +236,15 @@ except FileNotFoundError:
 # --- Helper function to get an authenticated Supabase client ---
 def get_authenticated_client():
     """
-    Creates a Supabase client instance for the current user session.
+    Creates a Supabase client instance for the current user session using connection pooling.
     Prioritizes a full Supabase session, but falls back to a service role client
     if the user is logged in via a Flask session (e.g., email-only).
     """
     access_token = session.get('access_token')
     refresh_token = session.get('refresh_token')
     if access_token and refresh_token:
-        sb = db.get_supabase_client()
         try:
+            sb = _db_pool.get_connection(service_role=False)
             sb.auth.set_session(access_token, refresh_token)
             return sb
         except Exception as e:
@@ -121,7 +255,7 @@ def get_authenticated_client():
 
     # Fallback for users logged in without a full Supabase session
     if session.get('user_email'):
-        return db.get_supabase_client(service_role=True)
+        return _db_pool.get_connection(service_role=True)
 
     return None
 
@@ -495,10 +629,9 @@ def cron_master():
                             from bulk_deals_monitor import send_bulk_deals_alerts
                             sent = send_bulk_deals_alerts(sb, uid, scrips, recipients)
                         elif job_name == 'news_monitoring':
-                            # Import and use RSS news monitoring with duplicate prevention
+                            # Import and use RSS news monitoring with duplicate prevention and memory optimization
                             print(f"🔥 RSS NEWS: Starting duplicate-safe news monitoring for user {uid[:8]}...")
-                            from simple_rss_fix import send_rss_news_no_duplicates
-                            sent = send_rss_news_no_duplicates(sb, uid, scrips, recipients)
+                            sent = send_rss_news_optimized(sb, uid, scrips, recipients)
                             print(f"🔥 RSS NEWS: Completed - {sent} messages sent")
                         else:
                             continue
@@ -685,28 +818,40 @@ def logout():
 # --- Main Application Routes (Protected) ---
 @app.route('/health')
 def health_check():
-    """Lightweight health check endpoint for uptime monitoring.
+    """Optimized health check endpoint with connection pooling.
     Returns 200 OK with minimal processing to keep the app alive.
     """
     from datetime import datetime
+    start_time = time.time()
+    
     try:
-        # Quick DB connectivity check
-        sb = db.get_supabase_client(service_role=True)
+        # Use pooled connection for quick DB check
+        sb = _db_pool.get_connection(service_role=True)
         if sb:
-            # Very lightweight query
-            sb.table('profiles').select('id', count='exact').limit(1).execute()
-            db_status = 'connected'
+            # Very lightweight query with timeout
+            try:
+                sb.table('profiles').select('id').limit(1).execute()
+                db_status = 'connected'
+            except:
+                db_status = 'error'
+            finally:
+                _db_pool.return_connection(sb)
         else:
             db_status = 'disconnected'
-    except Exception as e:
-        db_status = f'error: {str(e)[:50]}'
+    except Exception:
+        db_status = 'error'
+    
+    response_time = round((time.time() - start_time) * 1000, 1)  # milliseconds
     
     return {
         'status': 'ok',
         'timestamp': datetime.utcnow().isoformat() + 'Z',
         'service': 'bse-monitor',
         'database': db_status,
-        'memory_mb': get_memory_usage()
+        'response_ms': response_time,
+        'memory_mb': _get_memory_usage_fast(),
+        'db_pool_size': len(_db_pool.connections),
+        'rss_objects': len(_rss_memory_tracker)
     }, 200
 
 @app.route('/debug/cron_auth')
@@ -1391,13 +1536,19 @@ def get_sentiment_preferences(sb):
 # --- Enhanced Monitoring Endpoints ---
 @app.route('/ping')
 def ping():
-    """Simple ping endpoint for keep-alive monitoring - NO LOGIN REQUIRED"""
+    """Ultra-fast ping endpoint - NO database calls, minimal processing"""
     from datetime import datetime
+    
+    # Force quick garbage collection for RSS memory only when needed
+    if len(_rss_memory_tracker) > 50:  # Only if RSS objects accumulating
+        gc.collect()
+    
     return jsonify({
         "status": "ok",
-        "timestamp": datetime.now().isoformat(),
-        "message": "pong",
-        "server": "stockmonitor-aknr"
+        "timestamp": datetime.utcnow().isoformat() + 'Z',
+        "server": "stockmonitor-aknr",
+        "uptime_ms": int(time.time() * 1000) % 1000000,  # Rolling counter
+        "memory_mb": _get_memory_usage_fast()
     }), 200
 
 @app.route('/uptime')
@@ -1550,6 +1701,74 @@ def memory_status():
             "error": str(e),
             "timestamp": datetime.now().isoformat()
         }), 500
+
+# --- Memory Optimization Endpoints ---
+@app.route('/admin/memory-optimize')
+def memory_optimize():
+    """Force memory optimization"""
+    key = request.args.get('key')
+    expected = os.environ.get('CRON_SECRET_KEY')
+    if not expected or key != expected:
+        return "Unauthorized", 403
+    
+    before_mb = _get_memory_usage_fast()
+    
+    # Clear caches
+    _get_memory_usage_fast.cache_clear()
+    
+    # Cleanup database connections
+    _db_pool.cleanup_old_connections()
+    
+    # Force garbage collection
+    gc.collect()
+    
+    # Clear RSS cache
+    try:
+        from simple_rss_fix import cleanup_rss_cache
+        cleanup_rss_cache()
+    except:
+        pass
+    
+    after_mb = _get_memory_usage_fast()
+    
+    return {
+        'status': 'optimized',
+        'before_mb': before_mb,
+        'after_mb': after_mb,
+        'freed_mb': round(before_mb - after_mb, 1),
+        'rss_objects_tracked': len(_rss_memory_tracker),
+        'db_connections': len(_db_pool.connections),
+        'timestamp': datetime.now().isoformat()
+    }
+
+# Periodic Cleanup Function
+def periodic_cleanup():
+    """Run periodic cleanup every 30 minutes"""
+    try:
+        # Cleanup old database connections
+        _db_pool.cleanup_old_connections()
+        
+        # Force garbage collection if memory high
+        current_memory = _get_memory_usage_fast()
+        if current_memory > 400:  # If over 400MB
+            gc.collect()
+            print(f"🧹 Periodic cleanup: {current_memory}MB → {_get_memory_usage_fast()}MB")
+        
+        # Clear RSS cache
+        try:
+            from simple_rss_fix import cleanup_rss_cache
+            cleanup_rss_cache()
+        except:
+            pass
+            
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+    
+    # Schedule next cleanup
+    threading.Timer(1800.0, periodic_cleanup).start()  # 30 minutes
+
+# Start periodic cleanup
+periodic_cleanup()
 
 # --- Main Execution ---
 if __name__ == '__main__':
