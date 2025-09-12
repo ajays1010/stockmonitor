@@ -1210,10 +1210,13 @@ def enhanced_send_news_alerts(user_client, user_id: str, monitored_scrips, teleg
                 title = article.get('title', 'Unknown')[:50]
                 print(f"NEWS: Stored article to prevent duplicates: {title}...")
             
-            # Cleanup old cache entries occasionally
+            # Cleanup old cache entries occasionally (much less frequently)
             import random
-            if random.randint(1, 10) == 1:
-                cleanup_cache()
+            if random.randint(1, 100) == 1:  # Reduced from 10% to 1% chance
+                try:
+                    cleanup_cache()
+                except:
+                    pass  # Ignore cleanup errors
         
         if os.environ.get('BSE_VERBOSE', '0') == '1':
             print(f"NEWS: Enhanced alerts completed. Messages sent: {messages_sent}")

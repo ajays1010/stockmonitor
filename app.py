@@ -275,22 +275,50 @@ def process_single_company_memory_safe(sb, user_id: str, company_name: str, reci
     messages_sent = 0
     
     try:
-        # Import only when needed
-        from updated_enhanced_news_monitor import EnhancedNewsMonitor
+        # Import RSS fetcher directly to avoid memory-intensive enhanced monitor
+        from rss_news_fetcher import RSSNewsFetcher
         
-        # Create monitor instance
-        news_monitor = EnhancedNewsMonitor()
+        # Create RSS fetcher instance (much more memory efficient)
+        rss_fetcher = RSSNewsFetcher()
         
-        # Fetch news with memory limits
-        news_result = news_monitor.fetch_today_news_only(company_name)
+        # Fetch news directly from RSS with memory limits
+        news_result = rss_fetcher.fetch_comprehensive_rss_news(company_name)
+        
+        # Filter for today's articles only
+        if news_result.get('success'):
+            all_articles = news_result.get('articles', [])
+            today_articles = []
+            
+            from datetime import datetime
+            today = datetime.now().date()
+            
+            for article in all_articles:
+                pub_date_str = article.get('pubDate', article.get('published_at', ''))
+                if pub_date_str:
+                    try:
+                        # Simple date parsing for today's filter
+                        from dateutil import parser
+                        dt_parsed = parser.parse(pub_date_str)
+                        if dt_parsed.date() == today:
+                            today_articles.append(article)
+                    except:
+                        # If date parsing fails, include the article
+                        today_articles.append(article)
+                else:
+                    # If no date, include the article
+                    today_articles.append(article)
+            
+            # Update result with filtered articles
+            news_result['articles'] = today_articles
+            news_result['success'] = len(today_articles) > 0
         
         if not news_result.get('success'):
-            del news_monitor
+            del rss_fetcher
             return 0
         
         articles = news_result.get('articles', [])
         if not articles:
-            del news_monitor, news_result
+            del rss_fetcher, news_result
             return 0
         
         # Optimized logging - show total and sources with positive counts only
@@ -324,7 +352,7 @@ def process_single_company_memory_safe(sb, user_id: str, company_name: str, reci
         
         # Clear from memory
         articles.clear()
-        del articles, news_result, news_monitor
+        del articles, news_result, rss_fetcher
         
     except Exception as e:
         print(f"❌ Error in process_single_company_memory_safe: {e}")
