@@ -208,11 +208,17 @@ def rss_memory_manager():
 
 # Memory-Efficient RSS News Function
 def send_rss_news_optimized(sb, user_id, scrips, recipients):
-    """Ultra memory-efficient RSS news processing to prevent SIGKILL"""
+    """Ultra memory-efficient RSS news processing with timeout protection"""
     messages_sent = 0
     initial_memory = _get_memory_usage_fast()
     
     print(f"🧠 RSS MEMORY: Starting with {initial_memory}MB for user {user_id[:8]}...")
+    
+    # Overall timeout protection for entire RSS processing
+    import signal
+    import time
+    start_time = time.time()
+    max_total_time = 25  # 25 seconds max for entire RSS processing
     
     try:
         # Process companies one at a time with aggressive cleanup
@@ -224,12 +230,18 @@ def send_rss_news_optimized(sb, user_id, scrips, recipients):
             print(f"📰 RSS MEMORY: Processing {i+1}/{len(scrips)}: {company_name}")
             current_memory = _get_memory_usage_fast()
             
-            # Skip processing if memory is already high
-            if current_memory > 450:  # 450MB limit
+            # Much stricter memory limit to prevent SIGKILL
+            if current_memory > 350:  # Reduced from 450MB to 350MB
                 print(f"🧠 MEMORY LIMIT REACHED: {current_memory}MB - skipping remaining companies")
                 break
             
             try:
+                # Check overall timeout
+                elapsed_time = time.time() - start_time
+                if elapsed_time > max_total_time:
+                    print(f"⏰ OVERALL TIMEOUT: RSS processing exceeded {max_total_time}s - stopping")
+                    break
+                
                 # Process this company with strict memory limits
                 company_messages = process_single_company_memory_safe(
                     sb, user_id, company_name, recipients
@@ -243,11 +255,20 @@ def send_rss_news_optimized(sb, user_id, scrips, recipients):
                 print(f"🧠 Memory: {current_memory}MB → {after_memory}MB (sent {company_messages} messages)")
                 
                 # Extra cleanup if memory increased significantly
-                if after_memory > current_memory + 50:  # 50MB+ increase
+                if after_memory > current_memory + 30:  # Reduced from 50MB to 30MB
                     print(f"🧠 HIGH MEMORY INCREASE - forcing extra cleanup")
-                    for _ in range(3):
+                    for _ in range(5):  # Increased cleanup cycles
                         gc.collect()
-                    time.sleep(0.5)  # Give system time to clean up
+                    time.sleep(1.0)  # Increased wait time
+                    
+                    # Check if cleanup worked
+                    final_memory = _get_memory_usage_fast()
+                    print(f"🧠 Cleanup result: {after_memory}MB → {final_memory}MB")
+                    
+                    # If still high, stop processing
+                    if final_memory > 400:
+                        print(f"🧠 MEMORY STILL HIGH: {final_memory}MB - stopping RSS processing")
+                        break
                 
             except Exception as e:
                 print(f"❌ Error processing {company_name}: {e}")
@@ -271,18 +292,53 @@ def send_rss_news_optimized(sb, user_id, scrips, recipients):
     return messages_sent
 
 def process_single_company_memory_safe(sb, user_id: str, company_name: str, recipients: List[Dict]) -> int:
-    """Process a single company with strict memory management"""
+    """Process a single company with strict memory management and timeout protection"""
     messages_sent = 0
     
     try:
+        # Add cross-platform timeout protection
+        import threading
+        import time
+        
+        # Track start time for timeout
+        start_time = time.time()
+        timeout_seconds = 15
         # Import RSS fetcher directly to avoid memory-intensive enhanced monitor
         from rss_news_fetcher import RSSNewsFetcher
         
         # Create RSS fetcher instance (much more memory efficient)
         rss_fetcher = RSSNewsFetcher()
         
-        # Fetch news directly from RSS with memory limits
+        # Check memory before RSS fetch
+        pre_fetch_memory = _get_memory_usage_fast()
+        if pre_fetch_memory > 400:  # 400MB limit before even trying
+            print(f"🧠 MEMORY LIMIT: {pre_fetch_memory}MB - skipping RSS fetch for {company_name}")
+            return 0
+        
+        # Fetch news directly from RSS with memory limits and timeout check
+        print(f"🔍 RSS FETCH: Starting for {company_name} (memory: {pre_fetch_memory}MB)")
+        
+        # Check timeout before RSS fetch
+        if time.time() - start_time > timeout_seconds:
+            raise TimeoutError(f"RSS processing timeout for {company_name}")
+        
         news_result = rss_fetcher.fetch_comprehensive_rss_news(company_name)
+        
+        # Check timeout after RSS fetch
+        if time.time() - start_time > timeout_seconds:
+            raise TimeoutError(f"RSS processing timeout for {company_name}")
+        
+        # Check memory after fetch
+        post_fetch_memory = _get_memory_usage_fast()
+        print(f"🔍 RSS FETCH: Completed for {company_name} (memory: {pre_fetch_memory}MB → {post_fetch_memory}MB)")
+        
+        # If memory spiked too much, force cleanup
+        if post_fetch_memory > pre_fetch_memory + 100:  # 100MB spike
+            print(f"🧠 MEMORY SPIKE DETECTED: {post_fetch_memory - pre_fetch_memory}MB - forcing cleanup")
+            import gc
+            for _ in range(3):
+                gc.collect()
+            print(f"🧠 After cleanup: {_get_memory_usage_fast()}MB")
         
         # Filter for today's articles only
         if news_result.get('success'):
@@ -293,6 +349,10 @@ def process_single_company_memory_safe(sb, user_id: str, company_name: str, reci
             today = datetime.now().date()
             
             for article in all_articles:
+                # Check timeout during processing
+                if time.time() - start_time > timeout_seconds:
+                    raise TimeoutError(f"RSS processing timeout for {company_name}")
+                
                 pub_date_str = article.get('pubDate', article.get('published_at', ''))
                 if pub_date_str:
                     try:
@@ -354,8 +414,14 @@ def process_single_company_memory_safe(sb, user_id: str, company_name: str, reci
         articles.clear()
         del articles, news_result, rss_fetcher
         
+    except TimeoutError as e:
+        print(f"⏰ TIMEOUT: RSS processing for {company_name} exceeded 15 seconds - skipping")
+        return 0
     except Exception as e:
         print(f"❌ Error in process_single_company_memory_safe: {e}")
+    finally:
+        # No signal cleanup needed for time-based approach
+        pass
     
     return messages_sent
 
@@ -836,10 +902,16 @@ def cron_master():
                             from bulk_deals_monitor import send_bulk_deals_alerts
                             sent = send_bulk_deals_alerts(sb, uid, scrips, recipients)
                         elif job_name == 'news_monitoring':
-                            # Import and use RSS news monitoring with duplicate prevention and memory optimization
-                            print(f"🔥 RSS NEWS: Starting duplicate-safe news monitoring for user {uid[:8]}...")
-                            sent = send_rss_news_optimized(sb, uid, scrips, recipients)
-                            print(f"🔥 RSS NEWS: Completed - {sent} messages sent")
+                            # Check system memory before starting RSS processing
+                            system_memory = _get_memory_usage_fast()
+                            if system_memory > 300:  # Emergency bypass if already high
+                                print(f"🚨 EMERGENCY BYPASS: System memory {system_memory}MB too high - skipping RSS for user {uid[:8]}")
+                                sent = 0
+                            else:
+                                # Import and use RSS news monitoring with duplicate prevention and memory optimization
+                                print(f"🔥 RSS NEWS: Starting duplicate-safe news monitoring for user {uid[:8]}...")
+                                sent = send_rss_news_optimized(sb, uid, scrips, recipients)
+                                print(f"🔥 RSS NEWS: Completed - {sent} messages sent")
                         else:
                             continue
                         
