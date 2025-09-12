@@ -961,10 +961,250 @@ def cron_master():
         return jsonify({"ok": False, "error": str(e), "timestamp": datetime.now().isoformat()}), 500
 
 @app.route('/cron/bse_announcements')
-@app.route('/cron/hourly_spike_alerts')
-@app.route('/cron/evening_summary')
 @log_errors
 def cron_bse_announcements():
+    """Dedicated endpoint for BSE announcements only"""
+    key = request.args.get('key')
+    expected = os.environ.get('CRON_SECRET_KEY')
+    if not expected or key != expected:
+        return "Unauthorized", 403
+
+    sb = db.get_supabase_client(service_role=True)
+    if not sb:
+        return "Supabase not configured", 500
+
+    try:
+        from datetime import datetime
+        import uuid
+        
+        run_id = str(uuid.uuid4())
+        
+        # Get all users with scrips and recipients
+        scrip_rows = sb.table('monitored_scrips').select('user_id, bse_code, company_name').execute().data or []
+        rec_rows = sb.table('telegram_recipients').select('user_id, chat_id, user_name').execute().data or []
+
+        # Build maps by user
+        scrips_by_user = {}
+        for r in scrip_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            scrips_by_user.setdefault(uid, []).append({'bse_code': r.get('bse_code'), 'company_name': r.get('company_name')})
+
+        recs_by_user = {}
+        for r in rec_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            recs_by_user.setdefault(uid, []).append({
+                'chat_id': r.get('chat_id'), 
+                'user_name': r.get('user_name')
+            })
+
+        totals = {"users_processed": 0, "notifications_sent": 0, "users_skipped": 0}
+        errors = []
+
+        for uid, scrips in scrips_by_user.items():
+            recipients = recs_by_user.get(uid) or []
+            if not scrips or not recipients:
+                totals["users_skipped"] += 1
+                continue
+            try:
+                sent = db.send_bse_announcements_consolidated(sb, uid, scrips, recipients, hours_back=1)
+                totals["users_processed"] += 1
+                totals["notifications_sent"] += sent
+                
+                # Log the run
+                try:
+                    user_uuid = uid if uid and len(uid) == 36 and '-' in uid else None
+                    sb.table('cron_run_logs').insert({
+                        'run_id': run_id,
+                        'job': 'bse_announcements',
+                        'user_id': user_uuid,
+                        'processed': True,
+                        'notifications_sent': int(sent),
+                        'recipients': int(len(recipients)),
+                    }).execute()
+                except Exception as e:
+                    errors.append(f"Log error for user {uid}: {e}")
+                    
+            except Exception as e:
+                errors.append({"user_id": uid, "error": str(e)})
+
+        return jsonify({"ok": True, **totals, "errors": errors})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route('/cron/price_spike_alerts')
+@log_errors
+def cron_price_spike_alerts():
+    """Dedicated endpoint for price spike alerts only"""
+    key = request.args.get('key')
+    expected = os.environ.get('CRON_SECRET_KEY')
+    if not expected or key != expected:
+        return "Unauthorized", 403
+
+    sb = db.get_supabase_client(service_role=True)
+    if not sb:
+        return "Supabase not configured", 500
+
+    try:
+        from datetime import datetime
+        import uuid
+        
+        # Check if market is open
+        now_ist = db.ist_now()
+        is_market_hours, market_open, market_close = db.ist_market_window(now_ist)
+        is_working_day = now_ist.weekday() < 5
+        
+        if not (is_working_day and is_market_hours):
+            return jsonify({
+                "ok": True, 
+                "message": "Market closed - price alerts skipped",
+                "market_hours": is_market_hours,
+                "working_day": is_working_day
+            })
+        
+        run_id = str(uuid.uuid4())
+        
+        # Get all users with scrips and recipients
+        scrip_rows = sb.table('monitored_scrips').select('user_id, bse_code, company_name').execute().data or []
+        rec_rows = sb.table('telegram_recipients').select('user_id, chat_id, user_name').execute().data or []
+
+        # Build maps by user
+        scrips_by_user = {}
+        for r in scrip_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            scrips_by_user.setdefault(uid, []).append({'bse_code': r.get('bse_code'), 'company_name': r.get('company_name')})
+
+        recs_by_user = {}
+        for r in rec_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            recs_by_user.setdefault(uid, []).append({
+                'chat_id': r.get('chat_id'), 
+                'user_name': r.get('user_name')
+            })
+
+        totals = {"users_processed": 0, "notifications_sent": 0, "users_skipped": 0}
+        errors = []
+
+        for uid, scrips in scrips_by_user.items():
+            recipients = recs_by_user.get(uid) or []
+            if not scrips or not recipients:
+                totals["users_skipped"] += 1
+                continue
+            try:
+                sent = db.send_hourly_spike_alerts(sb, uid, scrips, recipients, price_threshold_pct=5.0, volume_threshold_pct=300.0)
+                totals["users_processed"] += 1
+                totals["notifications_sent"] += sent
+                
+                # Log the run
+                try:
+                    user_uuid = uid if uid and len(uid) == 36 and '-' in uid else None
+                    sb.table('cron_run_logs').insert({
+                        'run_id': run_id,
+                        'job': 'price_spike_alerts',
+                        'user_id': user_uuid,
+                        'processed': True,
+                        'notifications_sent': int(sent),
+                        'recipients': int(len(recipients)),
+                    }).execute()
+                except Exception as e:
+                    errors.append(f"Log error for user {uid}: {e}")
+                    
+            except Exception as e:
+                errors.append({"user_id": uid, "error": str(e)})
+
+        return jsonify({"ok": True, **totals, "errors": errors})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route('/cron/rss_news')
+@log_errors
+def cron_rss_news():
+    """Dedicated endpoint for RSS news processing only"""
+    key = request.args.get('key')
+    expected = os.environ.get('CRON_SECRET_KEY')
+    if not expected or key != expected:
+        return "Unauthorized", 403
+
+    sb = db.get_supabase_client(service_role=True)
+    if not sb:
+        return "Supabase not configured", 500
+
+    try:
+        from datetime import datetime
+        import uuid
+        
+        run_id = str(uuid.uuid4())
+        
+        # Get all users with scrips and recipients
+        scrip_rows = sb.table('monitored_scrips').select('user_id, bse_code, company_name').execute().data or []
+        rec_rows = sb.table('telegram_recipients').select('user_id, chat_id, user_name').execute().data or []
+
+        # Build maps by user
+        scrips_by_user = {}
+        for r in scrip_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            scrips_by_user.setdefault(uid, []).append({'bse_code': r.get('bse_code'), 'company_name': r.get('company_name')})
+
+        recs_by_user = {}
+        for r in rec_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            recs_by_user.setdefault(uid, []).append({
+                'chat_id': r.get('chat_id'), 
+                'user_name': r.get('user_name')
+            })
+
+        totals = {"users_processed": 0, "notifications_sent": 0, "users_skipped": 0}
+        errors = []
+
+        for uid, scrips in scrips_by_user.items():
+            recipients = recs_by_user.get(uid) or []
+            if not scrips or not recipients:
+                totals["users_skipped"] += 1
+                continue
+            try:
+                print(f"🔥 RSS NEWS: Starting for user {uid[:8]}...")
+                sent = send_rss_news_optimized(sb, uid, scrips, recipients)
+                print(f"🔥 RSS NEWS: Completed - {sent} messages sent")
+                
+                totals["users_processed"] += 1
+                totals["notifications_sent"] += sent
+                
+                # Log the run
+                try:
+                    user_uuid = uid if uid and len(uid) == 36 and '-' in uid else None
+                    sb.table('cron_run_logs').insert({
+                        'run_id': run_id,
+                        'job': 'rss_news',
+                        'user_id': user_uuid,
+                        'processed': True,
+                        'notifications_sent': int(sent),
+                        'recipients': int(len(recipients)),
+                    }).execute()
+                except Exception as e:
+                    errors.append(f"Log error for user {uid}: {e}")
+                    
+            except Exception as e:
+                errors.append({"user_id": uid, "error": str(e)})
+                print(f"❌ RSS ERROR for user {uid}: {e}")
+
+        return jsonify({"ok": True, **totals, "errors": errors})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route('/cron/daily_summary')
+@log_errors
+def cron_daily_summary():
     """Cron-compatible endpoint to send BSE announcements.
     Expects a secret key in query string (?key=...) to prevent abuse.
     Optionally accepts hours_back (default 1).
