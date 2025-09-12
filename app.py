@@ -23,6 +23,7 @@ from contextlib import contextmanager
 import psutil
 from functools import lru_cache
 import time
+from typing import List, Dict
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "a-super-secret-key-for-local-testing")
@@ -167,11 +168,17 @@ def _get_memory_usage_fast():
 
 # Clear cache every 10 seconds
 def _clear_memory_cache():
-    _get_memory_usage_fast.cache_clear()
-    threading.Timer(10.0, _clear_memory_cache).start()
+    try:
+        _get_memory_usage_fast.cache_clear()
+        # Only restart timer if not in debug mode
+        if not app.debug:
+            threading.Timer(10.0, _clear_memory_cache).start()
+    except Exception as e:
+        print(f"Memory cache clear error: {e}")
 
-# Start the cache clearing timer
-_clear_memory_cache()
+# Start the cache clearing timer only in production
+if not os.environ.get('FLASK_DEBUG') == '1':
+    _clear_memory_cache()
 
 # RSS Memory Management Context Manager
 @contextmanager
@@ -199,31 +206,203 @@ def rss_memory_manager():
             gc.collect()
             print(f"🧹 RSS Memory cleanup: {initial_memory}MB → {_get_memory_usage_fast()}MB")
 
-# Optimized RSS News Function
+# Memory-Efficient RSS News Function
 def send_rss_news_optimized(sb, user_id, scrips, recipients):
-    """Memory-optimized RSS news sending"""
+    """Ultra memory-efficient RSS news processing to prevent SIGKILL"""
     messages_sent = 0
+    initial_memory = _get_memory_usage_fast()
     
-    with rss_memory_manager() as rss_tracker:
-        try:
-            # Import RSS function
-            from simple_rss_fix import send_rss_news_no_duplicates
+    print(f"🧠 RSS MEMORY: Starting with {initial_memory}MB for user {user_id[:8]}...")
+    
+    try:
+        # Process companies one at a time with aggressive cleanup
+        for i, scrip in enumerate(scrips):
+            company_name = scrip.get('company_name', '')
+            if not company_name:
+                continue
             
-            # Track this operation
-            rss_tracker.append({'operation': 'rss_news', 'user_id': user_id})
+            print(f"📰 RSS MEMORY: Processing {i+1}/{len(scrips)}: {company_name}")
+            current_memory = _get_memory_usage_fast()
             
-            # Call RSS function
-            messages_sent = send_rss_news_no_duplicates(sb, user_id, scrips, recipients)
+            # Skip processing if memory is already high
+            if current_memory > 450:  # 450MB limit
+                print(f"🧠 MEMORY LIMIT REACHED: {current_memory}MB - skipping remaining companies")
+                break
             
-            # Force cleanup after RSS processing
+            try:
+                # Process this company with strict memory limits
+                company_messages = process_single_company_memory_safe(
+                    sb, user_id, company_name, recipients
+                )
+                messages_sent += company_messages
+                
+                # Aggressive cleanup after each company
+                gc.collect()
+                
+                after_memory = _get_memory_usage_fast()
+                print(f"🧠 Memory: {current_memory}MB → {after_memory}MB (sent {company_messages} messages)")
+                
+                # Extra cleanup if memory increased significantly
+                if after_memory > current_memory + 50:  # 50MB+ increase
+                    print(f"🧠 HIGH MEMORY INCREASE - forcing extra cleanup")
+                    for _ in range(3):
+                        gc.collect()
+                    time.sleep(0.5)  # Give system time to clean up
+                
+            except Exception as e:
+                print(f"❌ Error processing {company_name}: {e}")
+                gc.collect()  # Cleanup on error
+                continue
+    
+    except Exception as e:
+        print(f"❌ RSS MEMORY ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    finally:
+        # Final aggressive cleanup
+        for _ in range(3):
             gc.collect()
-            
-        except Exception as e:
-            print(f"RSS Error: {e}")
-            # Force cleanup on error
-            gc.collect()
+        
+        final_memory = _get_memory_usage_fast()
+        memory_diff = final_memory - initial_memory
+        print(f"🧠 RSS MEMORY: Completed. {initial_memory}MB → {final_memory}MB (diff: {memory_diff:+.1f}MB)")
     
     return messages_sent
+
+def process_single_company_memory_safe(sb, user_id: str, company_name: str, recipients: List[Dict]) -> int:
+    """Process a single company with strict memory management"""
+    messages_sent = 0
+    
+    try:
+        # Import only when needed
+        from updated_enhanced_news_monitor import EnhancedNewsMonitor
+        
+        # Create monitor instance
+        news_monitor = EnhancedNewsMonitor()
+        
+        # Fetch news with memory limits
+        news_result = news_monitor.fetch_today_news_only(company_name)
+        
+        if not news_result.get('success'):
+            del news_monitor
+            return 0
+        
+        articles = news_result.get('articles', [])
+        if not articles:
+            del news_monitor, news_result
+            return 0
+        
+        # Optimized logging - show total and sources with positive counts only
+        if articles:
+            sources = {}
+            for article in articles:
+                source = article.get('source', 'Unknown')
+                sources[source] = sources.get(source, 0) + 1
+            
+            # Only show sources with articles found
+            positive_sources = [f"{source}: {count}" for source, count in sources.items() if count > 0]
+            source_summary = ", ".join(positive_sources) if positive_sources else "No sources"
+            print(f"📰 {company_name}: {len(articles)} articles ({source_summary})")
+        else:
+            print(f"📰 {company_name}: 0 articles")
+        
+        # Process recipients one at a time
+        for recipient in recipients:
+            try:
+                recipient_messages = process_single_recipient_memory_safe(
+                    sb, user_id, company_name, articles, recipient
+                )
+                messages_sent += recipient_messages
+                
+                # Cleanup after each recipient
+                gc.collect()
+                
+            except Exception as e:
+                print(f"❌ Error processing recipient {recipient.get('chat_id', 'unknown')}: {e}")
+                continue
+        
+        # Clear from memory
+        articles.clear()
+        del articles, news_result, news_monitor
+        
+    except Exception as e:
+        print(f"❌ Error in process_single_company_memory_safe: {e}")
+    
+    return messages_sent
+
+def process_single_recipient_memory_safe(sb, user_id: str, company_name: str, articles: List[Dict], recipient: Dict) -> int:
+    """Process a single recipient with memory safety and duplicate checking"""
+    try:
+        recipient_id = recipient['chat_id']
+        user_name = recipient.get('user_name', 'User')
+        
+        # Import duplicate checking functions
+        from simple_rss_fix import (
+            is_relevant_news, generate_rss_article_hash, 
+            is_rss_duplicate_in_memory, is_rss_duplicate_in_database,
+            mark_rss_sent_in_memory, record_rss_sent_in_database,
+            format_clean_rss_message
+        )
+        
+        # Filter articles for this recipient
+        new_articles = []
+        
+        for article in articles:
+            # FILTER 1: Relevance check
+            if not is_relevant_news(article, company_name):
+                continue
+            
+            # FILTER 2: Memory duplicate check
+            article_hash = generate_rss_article_hash(article, company_name, recipient_id)
+            if is_rss_duplicate_in_memory(article_hash):
+                continue
+            
+            # FILTER 3: Database duplicate check
+            if is_rss_duplicate_in_database(sb, article, company_name, user_id):
+                mark_rss_sent_in_memory(article_hash)
+                continue
+            
+            # Article is new and relevant
+            new_articles.append(article)
+        
+        if not new_articles:
+            return 0
+        
+        # Optimized logging - just show count and first article title
+        if len(new_articles) > 0:
+            first_title = new_articles[0].get('title', 'No title')[:50]
+            if len(new_articles) == 1:
+                print(f"📰 Sending to {user_name}: {first_title}...")
+            else:
+                print(f"📰 Sending to {user_name}: {len(new_articles)} articles (first: {first_title}...)")
+        else:
+            print(f"📰 No new articles for {user_name}")
+        
+        # Generate and send message
+        telegram_message = format_clean_rss_message(company_name, new_articles)
+        
+        try:
+            from database import send_telegram_message_with_user_name
+            if send_telegram_message_with_user_name(recipient_id, telegram_message, user_name):
+                # Mark articles as sent
+                for article in new_articles:
+                    article_hash = generate_rss_article_hash(article, company_name, recipient_id)
+                    mark_rss_sent_in_memory(article_hash)
+                    record_rss_sent_in_database(sb, article, company_name, user_id)
+                
+                return 1
+            else:
+                print(f"❌ Failed to send to {user_name}")
+                return 0
+                
+        except Exception as e:
+            print(f"❌ Error sending to {user_name}: {e}")
+            return 0
+    
+    except Exception as e:
+        print(f"❌ Error in process_single_recipient_memory_safe: {e}")
+        return 0
 
 # --- Load local company data into memory for searching ---
 try:
@@ -1722,10 +1901,12 @@ def memory_optimize():
     # Force garbage collection
     gc.collect()
     
-    # Clear RSS cache
+    # Clear RSS cache (less frequently)
     try:
-        from simple_rss_fix import cleanup_rss_cache
-        cleanup_rss_cache()
+        import random
+        if random.randint(1, 10) == 1:  # Only 10% of the time
+            from simple_rss_fix import cleanup_rss_cache
+            cleanup_rss_cache()
     except:
         pass
     
@@ -1754,21 +1935,25 @@ def periodic_cleanup():
             gc.collect()
             print(f"🧹 Periodic cleanup: {current_memory}MB → {_get_memory_usage_fast()}MB")
         
-        # Clear RSS cache
+        # Clear RSS cache (less frequently)
         try:
-            from simple_rss_fix import cleanup_rss_cache
-            cleanup_rss_cache()
+            import random
+            if random.randint(1, 20) == 1:  # Only 5% of the time during periodic cleanup
+                from simple_rss_fix import cleanup_rss_cache
+                cleanup_rss_cache()
         except:
             pass
             
     except Exception as e:
         print(f"Cleanup error: {e}")
     
-    # Schedule next cleanup
-    threading.Timer(1800.0, periodic_cleanup).start()  # 30 minutes
+    # Schedule next cleanup only in production
+    if not app.debug:
+        threading.Timer(1800.0, periodic_cleanup).start()  # 30 minutes
 
-# Start periodic cleanup
-periodic_cleanup()
+# Start periodic cleanup only in production
+if not os.environ.get('FLASK_DEBUG') == '1':
+    periodic_cleanup()
 
 # --- Main Execution ---
 if __name__ == '__main__':

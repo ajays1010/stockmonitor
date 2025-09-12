@@ -568,7 +568,11 @@ def cleanup_rss_cache():
     for key in expired_keys:
         del _RSS_SENT_CACHE[key]
     
-    print(f"📰 RSS: Cleaned up {len(expired_keys)} expired cache entries")
+    # Only log if there were entries to clean up or if cache is getting large
+    if len(expired_keys) > 0:
+        print(f"📰 RSS: Cleaned up {len(expired_keys)} expired cache entries")
+    elif len(_RSS_SENT_CACHE) > 100:  # Log if cache is getting large
+        print(f"📰 RSS: Cache status - {len(_RSS_SENT_CACHE)} active entries, 0 expired")
 
 def get_rss_cache_stats() -> Dict:
     """Get statistics about the RSS cache"""

@@ -990,18 +990,45 @@ def ist_now():
 
 def db_seen_announcement_exists(user_client, user_id: str, news_id: str) -> bool:
     """Check if announcement already recorded.
-    If the schema lacks user_id, fallback to global check by news_id only.
+    Enhanced with better duplicate prevention and logging.
     """
     try:
+        # First check user-specific record
         resp = (
             user_client
             .table('seen_announcements')
-            .select('news_id', count='exact')
+            .select('news_id, created_at', count='exact')
             .eq('news_id', news_id)
             .eq('user_id', user_id)
             .execute()
         )
-        return (getattr(resp, 'count', 0) or 0) > 0
+        
+        if (getattr(resp, 'count', 0) or 0) > 0:
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"BSE DUPLICATE PREVENTION: Found existing announcement {news_id} for user {user_id[:8]}")
+            return True
+            
+        # Additional check: look for recent announcements (last 10 minutes) to prevent race conditions
+        from datetime import datetime, timedelta
+        ten_minutes_ago = (datetime.now() - timedelta(minutes=10)).isoformat()
+        
+        recent_resp = (
+            user_client
+            .table('seen_announcements')
+            .select('news_id, created_at', count='exact')
+            .eq('news_id', news_id)
+            .eq('user_id', user_id)
+            .gte('created_at', ten_minutes_ago)
+            .execute()
+        )
+        
+        if (getattr(recent_resp, 'count', 0) or 0) > 0:
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"BSE DUPLICATE PREVENTION: Found recent announcement {news_id} for user {user_id[:8]} (within 10 min)")
+            return True
+            
+        return False
+        
     except Exception as e:
         msg = str(e).lower()
         # Fallback when user_id column is missing: de-dup globally by news_id
@@ -1014,12 +1041,15 @@ def db_seen_announcement_exists(user_client, user_id: str, news_id: str) -> bool
                     .eq('news_id', news_id)
                     .execute()
                 )
-                return (getattr(resp2, 'count', 0) or 0) > 0
+                exists = (getattr(resp2, 'count', 0) or 0) > 0
+                if exists and os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"BSE DUPLICATE PREVENTION: Found global announcement {news_id} (fallback check)")
+                return exists
             except Exception:
                 return False
         # Otherwise do not block sending
         try:
-            print(f"seen_announcements lookup failed, treating as new: {e}")
+            print(f"BSE DUPLICATE PREVENTION: Lookup failed for {news_id}, treating as new: {e}")
         except Exception:
             pass
         return False
@@ -1027,6 +1057,7 @@ def db_seen_announcement_exists(user_client, user_id: str, news_id: str) -> bool
 from typing import Optional
 
 def db_save_seen_announcement(user_client, user_id: str, news_id: str, scrip_code: str, headline: str, pdf_name: str, ann_dt_iso: str, caption: str, category: Optional[str] = None):
+    """Save seen announcement with enhanced duplicate prevention and logging."""
     payload = {
         'user_id': user_id,
         'news_id': news_id,
@@ -1036,25 +1067,60 @@ def db_save_seen_announcement(user_client, user_id: str, news_id: str, scrip_cod
         'ann_date': ann_dt_iso,
         'caption': caption,
     }
+    
     # Try insert with category first
     if category is not None:
         payload_with_cat = dict(payload)
         payload_with_cat['category'] = category
     else:
         payload_with_cat = payload
+        
     try:
+        # Double-check before saving to prevent race conditions
+        if db_seen_announcement_exists(user_client, user_id, news_id):
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"BSE DUPLICATE PREVENTION: Skipping save - announcement {news_id} already exists for user {user_id[:8]}")
+            return
+            
         user_client.table('seen_announcements').insert(payload_with_cat).execute()
+        
+        if os.environ.get('BSE_VERBOSE', '0') == '1':
+            print(f"BSE DUPLICATE PREVENTION: Saved announcement {news_id} for user {user_id[:8]} - {headline[:50]}...")
         return
+        
     except Exception as e:
         msg = str(e).lower()
+        
+        # Handle duplicate key errors (expected for race conditions)
+        if any(dup_keyword in msg for dup_keyword in ['duplicate', 'unique', 'constraint', 'already exists']):
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"BSE DUPLICATE PREVENTION: Duplicate key prevented for {news_id} - user {user_id[:8]} (expected behavior)")
+            return
+            
         # Retry without category if the column doesn't exist
         if 'category' in msg and ('column' in msg or 'does not exist' in msg):
             try:
+                # Double-check again before retry
+                if db_seen_announcement_exists(user_client, user_id, news_id):
+                    if os.environ.get('BSE_VERBOSE', '0') == '1':
+                        print(f"BSE DUPLICATE PREVENTION: Skipping retry save - announcement {news_id} already exists for user {user_id[:8]}")
+                    return
+                    
                 user_client.table('seen_announcements').insert(payload).execute()
+                
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"BSE DUPLICATE PREVENTION: Saved announcement {news_id} for user {user_id[:8]} (without category)")
                 return
-            except Exception:
-                pass
-        # Ignore duplicates and other transient errors silently
+            except Exception as retry_error:
+                retry_msg = str(retry_error).lower()
+                if any(dup_keyword in retry_msg for dup_keyword in ['duplicate', 'unique', 'constraint', 'already exists']):
+                    if os.environ.get('BSE_VERBOSE', '0') == '1':
+                        print(f"BSE DUPLICATE PREVENTION: Duplicate key prevented on retry for {news_id} - user {user_id[:8]}")
+                    return
+                    
+        # Log unexpected errors but don't block the process
+        if os.environ.get('BSE_VERBOSE', '0') == '1':
+            print(f"BSE DUPLICATE PREVENTION: Unexpected error saving {news_id} for user {user_id[:8]}: {e}")
         return
 
 ALLOWED_ANNOUNCEMENT_CATEGORIES = {
@@ -1248,6 +1314,12 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
     messages_sent = 0
     since_dt = ist_now() - timedelta(hours=hours_back)
 
+    if os.environ.get('BSE_VERBOSE', '0') == '1':
+        print(f"BSE PROCESSING: Starting for user {user_id[:8]}, {len(monitored_scrips)} scrips, {hours_back}h back")
+
+    # Track processed announcements in this run to prevent duplicates within the same execution
+    processed_in_this_run = set()
+
     # Fetch announcements for all scrips
     all_new = []
     for scrip in monitored_scrips:
@@ -1256,8 +1328,23 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
         allowed = get_user_category_prefs(user_client, user_id)
         ann = fetch_bse_announcements_for_scrip(scrip_code, since_dt, allowed_categories=allowed)
         for item in ann:
-            if not db_seen_announcement_exists(user_client, user_id, item['news_id']):
+            news_id = item['news_id']
+            
+            # Skip if already processed in this run
+            if news_id in processed_in_this_run:
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"BSE DUPLICATE PREVENTION: Skipping {news_id} - already processed in this run")
+                continue
+                
+            # Skip if already seen in database
+            if not db_seen_announcement_exists(user_client, user_id, news_id):
                 all_new.append(item)
+                processed_in_this_run.add(news_id)
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"BSE PROCESSING: Added new announcement {news_id} for processing")
+            else:
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"BSE DUPLICATE PREVENTION: Skipping {news_id} - already exists in database")
 
     recipients_count = len(telegram_recipients)
     ann_count = len(all_new)
