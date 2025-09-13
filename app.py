@@ -1488,35 +1488,9 @@ def lightweight_rss_news_processing(sb, user_id: str, scrips: List[Dict], recipi
                 print(f"  ❌ Query '{search_query}' failed: {e}")
                 continue
         
-        # Process articles with recipients (simple processing)
-        if all_articles:
-            print(f"📰 Found {len(all_articles)} total articles for {company_name}")
-            
-            # Send to recipients (simplified)
-            for recipient in recipients:
-                try:
-                    chat_id = recipient['chat_id']
-                    user_name = recipient.get('user_name', 'User')
-                    
-                    if all_articles:
-                        # Create simple message
-                        message_lines = [f"📰 News for {company_name}:"]
-                        for article in all_articles[:3]:  # Only first 3 articles
-                            title = article['title'][:100] + "..." if len(article['title']) > 100 else article['title']
-                            message_lines.append(f"• {title}")
-                            if article.get('link'):
-                                message_lines.append(f"  🔗 {article['link']}")
-                        
-                        message = "\n".join(message_lines)
-                        
-                        # Send via telegram
-                        from database import send_telegram_message_with_user_name
-                        if send_telegram_message_with_user_name(chat_id, message, user_name):
-                            messages_sent += 1
-                            print(f"📰 Sent news to {user_name} for {company_name}")
-                        
-                except Exception as e:
-                    print(f"❌ Error sending to {recipient.get('user_name', 'Unknown')}: {e}")
+        # Use the consolidated RSS system (single file, all functionality)
+        from consolidated_rss_news import process_consolidated_rss_news
+        messages_sent = process_consolidated_rss_news(sb, user_id, limited_scrips, recipients)
         
         print(f"📰 LIGHTWEIGHT RSS: Completed processing {len(limited_scrips)} companies")
     
