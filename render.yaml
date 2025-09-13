@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -w 3 -k sync -t 30 --max-requests 500 --max-requests-jitter 50 -b 0.0.0.0:$PORT app:app
+    startCommand: gunicorn -w 2 -k sync -t 60 --timeout 60 --max-requests 200 --max-requests-jitter 20 --worker-tmp-dir /dev/shm --preload -b 0.0.0.0:$PORT app:app
     healthCheckPath: /health
     autoDeploy: true
     envVars:
@@ -85,6 +85,7 @@ services:
     envVars:
       - key: CRON_SECRET_KEY
         sync: false
+
 
 
 
