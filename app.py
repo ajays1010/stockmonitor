@@ -121,9 +121,9 @@ class DatabaseConnectionPool:
         """Get a connection from the pool"""
         with self.lock:
             # Try to reuse existing connection
-            for conn in self.connections:
-                if conn not in self.in_use and conn.get('service_role') == service_role:
-                    self.in_use.add(conn)
+            for i, conn in enumerate(self.connections):
+                if i not in self.in_use and conn.get('service_role') == service_role:
+                    self.in_use.add(i)  # Use index instead of dict
                     return conn.get('client')
             
             # Create new connection if under limit
@@ -132,7 +132,8 @@ class DatabaseConnectionPool:
                     client = db.get_supabase_client(service_role=service_role)
                     conn = {'client': client, 'service_role': service_role, 'created': time.time()}
                     self.connections.append(conn)
-                    self.in_use.add(conn)
+                    conn_index = len(self.connections) - 1
+                    self.in_use.add(conn_index)  # Use index instead of dict
                     return client
                 except:
                     pass
@@ -143,19 +144,28 @@ class DatabaseConnectionPool:
     def return_connection(self, client):
         """Return connection to pool"""
         with self.lock:
-            for conn in self.connections:
-                if conn.get('client') == client and conn in self.in_use:
-                    self.in_use.remove(conn)
+            for i, conn in enumerate(self.connections):
+                if conn.get('client') == client and i in self.in_use:
+                    self.in_use.remove(i)
                     break
     
     def cleanup_old_connections(self):
         """Remove old connections (older than 1 hour)"""
         with self.lock:
             current_time = time.time()
-            self.connections = [
-                conn for conn in self.connections 
-                if current_time - conn.get('created', 0) < 3600 and conn not in self.in_use
-            ]
+            new_connections = []
+            new_in_use = set()
+            
+            for i, conn in enumerate(self.connections):
+                # Keep connection if it's recent AND not in use, OR if it's currently in use
+                if (current_time - conn.get('created', 0) < 3600 and i not in self.in_use) or i in self.in_use:
+                    new_index = len(new_connections)
+                    new_connections.append(conn)
+                    if i in self.in_use:
+                        new_in_use.add(new_index)
+            
+            self.connections = new_connections
+            self.in_use = new_in_use
 
 # Initialize connection pool
 _db_pool = DatabaseConnectionPool()
@@ -2227,9 +2237,26 @@ def add_scrip(sb):
 @login_required
 def delete_scrip(sb):
     user_id = session.get('user_id')
-    bse_code = request.form['scrip_code']
-    db.delete_user_scrip(sb, user_id, bse_code)
-    flash(f'Scrip {bse_code} removed from your watchlist.', 'success')
+    
+    # Safely extract scrip_code - handle both string and list cases
+    scrip_code = request.form.get('scrip_code')
+    if isinstance(scrip_code, list):
+        scrip_code = scrip_code[0] if scrip_code else None
+    elif isinstance(scrip_code, dict):
+        # Handle unexpected dict case
+        scrip_code = str(scrip_code) if scrip_code else None
+    
+    if not scrip_code:
+        flash('Invalid scrip code provided.', 'error')
+        return redirect(url_for('dashboard'))
+    
+    try:
+        db.delete_user_scrip(sb, user_id, str(scrip_code))
+        flash(f'Scrip {scrip_code} removed from your watchlist.', 'success')
+    except Exception as e:
+        flash(f'Error removing scrip: {str(e)}', 'error')
+        print(f"Error in delete_scrip: {e}")
+    
     return redirect(url_for('dashboard'))
 
 @app.route('/add_recipient', methods=['POST'])
