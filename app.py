@@ -170,19 +170,19 @@ def _get_memory_usage_fast():
     except:
         return 0
 
-# Clear cache every 10 seconds
+# Clear cache every 10 seconds - DISABLED TO PREVENT SIGKILL
 def _clear_memory_cache():
     try:
         _get_memory_usage_fast.cache_clear()
-        # Only restart timer if not in debug mode
-        if not app.debug:
-            threading.Timer(10.0, _clear_memory_cache).start()
+        # DISABLED: threading.Timer was causing SIGKILL issues
+        # if not app.debug:
+        #     threading.Timer(10.0, _clear_memory_cache).start()
     except Exception as e:
         print(f"Memory cache clear error: {e}")
 
-# Start the cache clearing timer only in production
-if not os.environ.get('FLASK_DEBUG') == '1':
-    _clear_memory_cache()
+# DISABLED: Start the cache clearing timer only in production
+# if not os.environ.get('FLASK_DEBUG') == '1':
+#     _clear_memory_cache()
 
 # RSS Memory Management Context Manager
 @contextmanager
@@ -919,16 +919,10 @@ def cron_master():
                             from bulk_deals_monitor import send_bulk_deals_alerts
                             sent = send_bulk_deals_alerts(sb, uid, scrips, recipients)
                         elif job_name == 'news_monitoring':
-                            # Check system memory before starting RSS processing
-                            system_memory = _get_memory_usage_fast()
-                            if system_memory > 300:  # Emergency bypass if already high
-                                print(f"🚨 EMERGENCY BYPASS: System memory {system_memory}MB too high - skipping RSS for user {uid[:8]}")
-                                sent = 0
-                            else:
-                                # Import and use RSS news monitoring with duplicate prevention and memory optimization
-                                print(f"🔥 RSS NEWS: Starting duplicate-safe news monitoring for user {uid[:8]}...")
-                                sent = send_rss_news_optimized(sb, uid, scrips, recipients)
-                                print(f"🔥 RSS NEWS: Completed - {sent} messages sent")
+                            # TEMPORARILY DISABLED RSS PROCESSING TO PREVENT SIGKILL
+                            print(f"🚨 RSS NEWS: DISABLED to prevent worker crashes - user {uid[:8]}")
+                            print(f"🚨 RSS NEWS: Use dedicated /cron/rss_news endpoint instead")
+                            sent = 0
                         else:
                             continue
                         
@@ -1190,9 +1184,15 @@ def cron_rss_news():
                 totals["users_skipped"] += 1
                 continue
             try:
-                print(f"📰 LIGHTWEIGHT RSS: Starting for user {uid[:8]}...")
-                sent = lightweight_rss_news_processing(sb, uid, scrips, recipients)
-                print(f"📰 LIGHTWEIGHT RSS: Completed - {sent} messages sent")
+                # Check system memory before starting any RSS processing
+                system_memory = _get_memory_usage_fast()
+                if system_memory > 250:  # Very conservative limit
+                    print(f"🚨 MEMORY PROTECTION: System memory {system_memory}MB too high - skipping RSS for user {uid[:8]}")
+                    sent = 0
+                else:
+                    print(f"📰 LIGHTWEIGHT RSS: Starting for user {uid[:8]}... (memory: {system_memory}MB)")
+                    sent = lightweight_rss_news_processing(sb, uid, scrips, recipients)
+                    print(f"📰 LIGHTWEIGHT RSS: Completed - {sent} messages sent")
                 
                 totals["users_processed"] += 1
                 totals["notifications_sent"] += sent
@@ -1330,8 +1330,85 @@ def cron_bulk_deals():
         print(f"💼 BULK DEALS: Fatal error - {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
+def is_news_relevant_simple(title: str, company_name: str) -> bool:
+    """Simple relevance check for news articles"""
+    if not title or not company_name:
+        return False
+    
+    title_lower = title.lower()
+    company_lower = company_name.lower()
+    
+    # Extract company keywords (first word, remove common suffixes)
+    company_words = company_lower.replace(' ltd', '').replace(' limited', '').replace(' inc', '').replace(' corp', '').split()
+    
+    # Check if any company word appears in title
+    for word in company_words:
+        if len(word) > 3 and word in title_lower:  # Only check meaningful words
+            return True
+    
+    return False
+
+def get_next_companies_to_process(sb, user_id: str, scrips: List[Dict], batch_size: int = 2) -> List[Dict]:
+    """Get the next batch of companies to process using rotation tracking"""
+    try:
+        # Get last processed company index for this user
+        result = sb.table('rss_processing_tracker').select('last_processed_index, updated_at').eq('user_id', user_id).execute()
+        
+        last_index = 0
+        if result.data:
+            last_index = result.data[0].get('last_processed_index', 0)
+            
+            # Check if we completed a full cycle recently (within last hour)
+            from datetime import datetime, timedelta
+            last_updated = result.data[0].get('updated_at')
+            if last_updated:
+                try:
+                    last_time = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
+                    if datetime.now().timestamp() - last_time.timestamp() > 3600:  # 1 hour
+                        last_index = 0  # Reset if it's been too long
+                except:
+                    last_index = 0
+        
+        # Calculate next batch
+        start_index = (last_index) % len(scrips)
+        end_index = min(start_index + batch_size, len(scrips))
+        
+        # Get the batch
+        batch = scrips[start_index:end_index]
+        
+        # If we didn't get enough companies and haven't wrapped around, get from beginning
+        if len(batch) < batch_size and start_index > 0:
+            remaining = batch_size - len(batch)
+            batch.extend(scrips[:remaining])
+            next_index = remaining
+        else:
+            next_index = end_index
+        
+        # Update tracking
+        try:
+            if result.data:
+                sb.table('rss_processing_tracker').update({
+                    'last_processed_index': next_index,
+                    'updated_at': datetime.now().isoformat()
+                }).eq('user_id', user_id).execute()
+            else:
+                sb.table('rss_processing_tracker').insert({
+                    'user_id': user_id,
+                    'last_processed_index': next_index,
+                    'updated_at': datetime.now().isoformat()
+                }).execute()
+        except Exception as e:
+            print(f"Warning: Could not update RSS tracking: {e}")
+        
+        print(f"📰 RSS ROTATION: Processing companies {start_index}-{start_index+len(batch)-1} of {len(scrips)}")
+        return batch
+        
+    except Exception as e:
+        print(f"Warning: RSS tracking failed, using first {batch_size} companies: {e}")
+        return scrips[:batch_size]
+
 def lightweight_rss_news_processing(sb, user_id: str, scrips: List[Dict], recipients: List[Dict]) -> int:
-    """RSS processing with proper duplicate prevention and blacklisting"""
+    """RSS processing with company rotation and duplicate prevention"""
     messages_sent = 0
     
     try:
@@ -1341,16 +1418,20 @@ def lightweight_rss_news_processing(sb, user_id: str, scrips: List[Dict], recipi
         from datetime import datetime, timedelta
         import hashlib
         
-        # Process only the FIRST company to minimize memory usage
+        # Process companies using rotation system
         if not scrips:
             return 0
             
-        scrip = scrips[0]  # Only process first company
-        company_name = scrip.get('company_name', '')
-        if not company_name:
-            return 0
+        # Get next batch of companies to process
+        limited_scrips = get_next_companies_to_process(sb, user_id, scrips, batch_size=2)
+        print(f"📰 LIGHTWEIGHT RSS: Processing {len(limited_scrips)} companies via rotation")
         
-        print(f"📰 Processing with duplicate prevention: {company_name}")
+        for scrip in limited_scrips:
+            company_name = scrip.get('company_name', '')
+            if not company_name:
+                continue
+            
+            print(f"📰 Processing with duplicate prevention: {company_name}")
         
         # Multiple search queries to catch important news
         search_queries = [
@@ -1384,7 +1465,7 @@ def lightweight_rss_news_processing(sb, user_id: str, scrips: List[Dict], recipi
                         continue
                     
                     # Enhanced relevance check
-                    if not is_news_relevant(title, company_name):
+                    if not is_news_relevant_simple(title, company_name):
                         continue
                     
                     # Extract source from Google News title format
@@ -1407,9 +1488,37 @@ def lightweight_rss_news_processing(sb, user_id: str, scrips: List[Dict], recipi
                 print(f"  ❌ Query '{search_query}' failed: {e}")
                 continue
         
-        # Use dedicated RSS processor
-        from dedicated_rss_news import process_rss_news_for_user
-        messages_sent = process_rss_news_for_user(sb, user_id, scrips, recipients)
+        # Process articles with recipients (simple processing)
+        if all_articles:
+            print(f"📰 Found {len(all_articles)} total articles for {company_name}")
+            
+            # Send to recipients (simplified)
+            for recipient in recipients:
+                try:
+                    chat_id = recipient['chat_id']
+                    user_name = recipient.get('user_name', 'User')
+                    
+                    if all_articles:
+                        # Create simple message
+                        message_lines = [f"📰 News for {company_name}:"]
+                        for article in all_articles[:3]:  # Only first 3 articles
+                            title = article['title'][:100] + "..." if len(article['title']) > 100 else article['title']
+                            message_lines.append(f"• {title}")
+                            if article.get('link'):
+                                message_lines.append(f"  🔗 {article['link']}")
+                        
+                        message = "\n".join(message_lines)
+                        
+                        # Send via telegram
+                        from database import send_telegram_message_with_user_name
+                        if send_telegram_message_with_user_name(chat_id, message, user_name):
+                            messages_sent += 1
+                            print(f"📰 Sent news to {user_name} for {company_name}")
+                        
+                except Exception as e:
+                    print(f"❌ Error sending to {recipient.get('user_name', 'Unknown')}: {e}")
+        
+        print(f"📰 LIGHTWEIGHT RSS: Completed processing {len(limited_scrips)} companies")
     
     except Exception as e:
         print(f"❌ RSS processing error: {e}")
@@ -2588,9 +2697,9 @@ def memory_optimize():
         'timestamp': datetime.now().isoformat()
     }
 
-# Periodic Cleanup Function
+# Periodic Cleanup Function - DISABLED TO PREVENT SIGKILL
 def periodic_cleanup():
-    """Run periodic cleanup every 30 minutes"""
+    """Run periodic cleanup every 30 minutes - DISABLED"""
     try:
         # Cleanup old database connections
         _db_pool.cleanup_old_connections()
@@ -2613,13 +2722,13 @@ def periodic_cleanup():
     except Exception as e:
         print(f"Cleanup error: {e}")
     
-    # Schedule next cleanup only in production
-    if not app.debug:
-        threading.Timer(1800.0, periodic_cleanup).start()  # 30 minutes
+    # DISABLED: threading.Timer was causing SIGKILL issues
+    # if not app.debug:
+    #     threading.Timer(1800.0, periodic_cleanup).start()  # 30 minutes
 
-# Start periodic cleanup only in production
-if not os.environ.get('FLASK_DEBUG') == '1':
-    periodic_cleanup()
+# DISABLED: Start periodic cleanup only in production
+# if not os.environ.get('FLASK_DEBUG') == '1':
+#     periodic_cleanup()
 
 # --- Main Execution ---
 if __name__ == '__main__':
