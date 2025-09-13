@@ -132,38 +132,67 @@ def get_next_companies_to_process(sb, user_id: str, scrips: List[Dict], batch_si
                 except:
                     last_index = 0
         
-        # Calculate next batch
-        start_index = (last_index) % len(scrips)
-        end_index = min(start_index + batch_size, len(scrips))
+        # Calculate next batch - FIXED LOGIC
+        start_index = last_index % len(scrips)
+        batch = []
         
-        # Get the batch
-        batch = scrips[start_index:end_index]
+        # Always get exactly batch_size companies, wrapping around if needed
+        for i in range(batch_size):
+            company_index = (start_index + i) % len(scrips)
+            batch.append(scrips[company_index])
         
-        # If we didn't get enough companies and haven't wrapped around, get from beginning
-        if len(batch) < batch_size and start_index > 0:
-            remaining = batch_size - len(batch)
-            batch.extend(scrips[:remaining])
-            next_index = remaining
-        else:
-            next_index = end_index
+        # Calculate next starting index (where next run should start)
+        next_index = (start_index + batch_size) % len(scrips)
         
-        # Update tracking
+        # Debug information
+        batch_indices = [(start_index + i) % len(scrips) for i in range(batch_size)]
+        print(f"📰 ROTATION DEBUG: total_companies={len(scrips)}, batch_size={batch_size}")
+        print(f"📰 ROTATION DEBUG: last_index={last_index}, start_index={start_index}")
+        print(f"📰 ROTATION DEBUG: processing indices: {batch_indices}")
+        print(f"📰 ROTATION DEBUG: next_index will be: {next_index}")
+        
+        # Update tracking - with duplicate cleanup
         try:
+            from datetime import datetime as dt
+            current_time = dt.now().isoformat()
+            
+            # First, clean up any duplicate entries for this user
+            try:
+                all_entries = sb.table('rss_processing_tracker').select('id').eq('user_id', user_id).execute()
+                if all_entries.data and len(all_entries.data) > 1:
+                    print(f"📰 CLEANUP: Found {len(all_entries.data)} duplicate entries for user, cleaning up...")
+                    # Keep only the first entry, delete others
+                    for entry in all_entries.data[1:]:
+                        sb.table('rss_processing_tracker').delete().eq('id', entry['id']).execute()
+                    print(f"📰 CLEANUP: Removed {len(all_entries.data) - 1} duplicate entries")
+            except Exception as cleanup_error:
+                print(f"Warning: Could not cleanup duplicates: {cleanup_error}")
+            
+            # Now update or insert the tracking record
             if result.data:
                 sb.table('rss_processing_tracker').update({
                     'last_processed_index': next_index,
-                    'updated_at': datetime.now().isoformat()
+                    'total_companies': len(scrips),
+                    'updated_at': current_time
                 }).eq('user_id', user_id).execute()
+                print(f"📰 TRACKING: Updated user {user_id[:8]} -> next_index={next_index}")
             else:
                 sb.table('rss_processing_tracker').insert({
                     'user_id': user_id,
                     'last_processed_index': next_index,
-                    'updated_at': datetime.now().isoformat()
+                    'total_companies': len(scrips),
+                    'updated_at': current_time
                 }).execute()
+                print(f"📰 TRACKING: Created new record for user {user_id[:8]} -> next_index={next_index}")
+                
         except Exception as e:
             print(f"Warning: Could not update RSS tracking: {e}")
         
+        # Debug: Show which companies are being processed
+        company_names = [scrip.get('company_name', 'Unknown') for scrip in batch]
         print(f"📰 RSS ROTATION: Processing companies {start_index}-{start_index+len(batch)-1} of {len(scrips)}")
+        print(f"📰 COMPANIES IN BATCH: {', '.join(company_names[:3])}{'...' if len(company_names) > 3 else ''}")
+        
         return batch
         
     except Exception as e:
@@ -648,7 +677,7 @@ def process_consolidated_rss_news(sb, user_id: str, scrips: List[Dict], recipien
             return 0
         
         # Get next batch of companies to process using rotation
-        limited_scrips = get_next_companies_to_process(sb, user_id, scrips, batch_size=2)
+        limited_scrips = get_next_companies_to_process(sb, user_id, scrips, batch_size=3)
         
         print(f"📰 CONSOLIDATED RSS: Processing {len(limited_scrips)} companies via rotation")
         
