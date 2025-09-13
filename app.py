@@ -15,6 +15,10 @@ from sentiment_analyzer import get_sentiment_analysis_for_stock, create_sentimen
 from logging_config import github_logger
 import logging
 import traceback
+
+# Reduce httpx logging noise from Supabase
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("supabase").setLevel(logging.WARNING)
 import atexit
 import gc
 import threading
@@ -214,11 +218,10 @@ def send_rss_news_optimized(sb, user_id, scrips, recipients):
     
     print(f"🧠 RSS MEMORY: Starting with {initial_memory}MB for user {user_id[:8]}...")
     
-    # Overall timeout protection for entire RSS processing
-    import signal
+    # Simple time tracking without signals
     import time
     start_time = time.time()
-    max_total_time = 25  # 25 seconds max for entire RSS processing
+    max_total_time = 20  # 20 seconds max for entire RSS processing
     
     try:
         # Process companies one at a time with aggressive cleanup
@@ -296,13 +299,10 @@ def process_single_company_memory_safe(sb, user_id: str, company_name: str, reci
     messages_sent = 0
     
     try:
-        # Add cross-platform timeout protection
-        import threading
+        # Simple time tracking for timeout
         import time
-        
-        # Track start time for timeout
         start_time = time.time()
-        timeout_seconds = 15
+        timeout_seconds = 12
         # Import RSS fetcher directly to avoid memory-intensive enhanced monitor
         from rss_news_fetcher import RSSNewsFetcher
         
@@ -1126,7 +1126,7 @@ def cron_price_spike_alerts():
 @app.route('/cron/rss_news')
 @log_errors
 def cron_rss_news():
-    """Dedicated endpoint for RSS news processing only"""
+    """Ultra-lightweight RSS news processing"""
     key = request.args.get('key')
     expected = os.environ.get('CRON_SECRET_KEY')
     if not expected or key != expected:
@@ -1173,9 +1173,9 @@ def cron_rss_news():
                 totals["users_skipped"] += 1
                 continue
             try:
-                print(f"🔥 RSS NEWS: Starting for user {uid[:8]}...")
-                sent = send_rss_news_optimized(sb, uid, scrips, recipients)
-                print(f"🔥 RSS NEWS: Completed - {sent} messages sent")
+                print(f"📰 LIGHTWEIGHT RSS: Starting for user {uid[:8]}...")
+                sent = lightweight_rss_news_processing(sb, uid, scrips, recipients)
+                print(f"📰 LIGHTWEIGHT RSS: Completed - {sent} messages sent")
                 
                 totals["users_processed"] += 1
                 totals["notifications_sent"] += sent
@@ -1185,7 +1185,7 @@ def cron_rss_news():
                     user_uuid = uid if uid and len(uid) == 36 and '-' in uid else None
                     sb.table('cron_run_logs').insert({
                         'run_id': run_id,
-                        'job': 'rss_news',
+                        'job': 'rss_news_lightweight',
                         'user_id': user_uuid,
                         'processed': True,
                         'notifications_sent': int(sent),
@@ -1201,6 +1201,209 @@ def cron_rss_news():
         return jsonify({"ok": True, **totals, "errors": errors})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route('/cron/bulk_deals')
+@log_errors
+def cron_bulk_deals():
+    """Dedicated endpoint for bulk/block deals monitoring during market hours"""
+    key = request.args.get('key')
+    expected = os.environ.get('CRON_SECRET_KEY')
+    if not expected or key != expected:
+        return "Unauthorized", 403
+
+    sb = db.get_supabase_client(service_role=True)
+    if not sb:
+        return "Supabase not configured", 500
+
+    try:
+        from datetime import datetime
+        import uuid
+        
+        # Check if market is open and it's a working day
+        now_ist = db.ist_now()
+        is_market_hours, market_open, market_close = db.ist_market_window(now_ist)
+        is_working_day = now_ist.weekday() < 5
+        
+        if not (is_working_day and is_market_hours):
+            return jsonify({
+                "ok": True, 
+                "message": "Market closed - bulk deals monitoring skipped",
+                "market_hours": is_market_hours,
+                "working_day": is_working_day,
+                "current_time": now_ist.strftime('%Y-%m-%d %H:%M:%S'),
+                "market_open": market_open.strftime('%H:%M'),
+                "market_close": market_close.strftime('%H:%M')
+            })
+        
+        run_id = str(uuid.uuid4())
+        
+        # Get all users with scrips and recipients
+        scrip_rows = sb.table('monitored_scrips').select('user_id, bse_code, company_name').execute().data or []
+        rec_rows = sb.table('telegram_recipients').select('user_id, chat_id, user_name').execute().data or []
+
+        # Build maps by user
+        scrips_by_user = {}
+        for r in scrip_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            scrips_by_user.setdefault(uid, []).append({'bse_code': r.get('bse_code'), 'company_name': r.get('company_name')})
+
+        recs_by_user = {}
+        for r in rec_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            recs_by_user.setdefault(uid, []).append({
+                'chat_id': r.get('chat_id'), 
+                'user_name': r.get('user_name')
+            })
+
+        totals = {"users_processed": 0, "notifications_sent": 0, "users_skipped": 0}
+        errors = []
+
+        print(f"💼 BULK DEALS: Starting monitoring for {len(scrips_by_user)} users during market hours...")
+
+        for uid, scrips in scrips_by_user.items():
+            recipients = recs_by_user.get(uid) or []
+            if not scrips or not recipients:
+                totals["users_skipped"] += 1
+                continue
+            try:
+                print(f"💼 BULK DEALS: Processing user {uid[:8]} with {len(scrips)} scrips...")
+                
+                # Import and use bulk deals monitoring
+                from bulk_deals_monitor import send_bulk_deals_alerts
+                sent = send_bulk_deals_alerts(sb, uid, scrips, recipients)
+                
+                totals["users_processed"] += 1
+                totals["notifications_sent"] += sent
+                
+                print(f"💼 BULK DEALS: User {uid[:8]} - sent {sent} notifications")
+                
+                # Log the run
+                try:
+                    user_uuid = uid if uid and len(uid) == 36 and '-' in uid else None
+                    sb.table('cron_run_logs').insert({
+                        'run_id': run_id,
+                        'job': 'bulk_deals_monitoring',
+                        'user_id': user_uuid,
+                        'processed': True,
+                        'notifications_sent': int(sent),
+                        'recipients': int(len(recipients)),
+                    }).execute()
+                except Exception as e:
+                    errors.append(f"Log error for user {uid}: {e}")
+                    
+            except Exception as e:
+                errors.append({"user_id": uid, "error": str(e)})
+                print(f"❌ BULK DEALS ERROR for user {uid}: {e}")
+
+        print(f"💼 BULK DEALS: Completed - {totals['users_processed']} users processed, {totals['notifications_sent']} notifications sent")
+
+        return jsonify({
+            "ok": True, 
+            "message": f"Bulk deals monitoring completed during market hours",
+            "current_time": now_ist.strftime('%Y-%m-%d %H:%M:%S'),
+            "market_status": "OPEN",
+            **totals, 
+            "errors": errors
+        })
+    except Exception as e:
+        print(f"💼 BULK DEALS: Fatal error - {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+def lightweight_rss_news_processing(sb, user_id: str, scrips: List[Dict], recipients: List[Dict]) -> int:
+    """RSS processing with proper duplicate prevention and blacklisting"""
+    messages_sent = 0
+    
+    try:
+        import requests
+        import feedparser
+        from urllib.parse import quote_plus
+        from datetime import datetime, timedelta
+        import hashlib
+        
+        # Process only the FIRST company to minimize memory usage
+        if not scrips:
+            return 0
+            
+        scrip = scrips[0]  # Only process first company
+        company_name = scrip.get('company_name', '')
+        if not company_name:
+            return 0
+        
+        print(f"📰 Processing with duplicate prevention: {company_name}")
+        
+        # Multiple search queries to catch important news
+        search_queries = [
+            f'"{company_name}" India stock',
+            f'"{company_name}" order',
+            f'"{company_name}" news'
+        ]
+        
+        all_articles = []
+        headers = {'User-Agent': 'Mozilla/5.0 (compatible; NewsBot/1.0)'}
+        
+        # Try each search query
+        for search_query in search_queries:
+            try:
+                search_encoded = quote_plus(search_query)
+                url = f'https://news.google.com/rss/search?q={search_encoded}&hl=en&gl=IN&ceid=IN:en'
+                
+                response = requests.get(url, headers=headers, timeout=8)
+                if response.status_code != 200:
+                    continue
+                
+                feed = feedparser.parse(response.content)
+                
+                # Process first 5 entries from each query
+                for entry in feed.entries[:5]:
+                    title = entry.get('title', '').strip()
+                    link = entry.get('link', '').strip()
+                    pub_date = entry.get('published', '')
+                    
+                    if not title or len(title) < 15:
+                        continue
+                    
+                    # Enhanced relevance check
+                    if not is_news_relevant(title, company_name):
+                        continue
+                    
+                    # Extract source from Google News title format
+                    source = 'Google News'
+                    if ' - ' in title:
+                        parts = title.split(' - ')
+                        if len(parts) >= 2:
+                            source = parts[-1].strip()
+                            title = ' - '.join(parts[:-1]).strip()
+                    
+                    all_articles.append({
+                        'title': title[:120],
+                        'source': source,
+                        'link': link,
+                        'pubDate': pub_date,
+                        'company': company_name
+                    })
+                    
+            except Exception as e:
+                print(f"  ❌ Query '{search_query}' failed: {e}")
+                continue
+        
+        # Use dedicated RSS processor
+        from dedicated_rss_news import process_rss_news_for_user
+        messages_sent = process_rss_news_for_user(sb, user_id, scrips, recipients)
+    
+    except Exception as e:
+        print(f"❌ RSS processing error: {e}")
+    
+    finally:
+        # Force cleanup
+        import gc
+        gc.collect()
+    
+    return messages_sent
+
 
 @app.route('/cron/daily_summary')
 @log_errors
@@ -1506,6 +1709,112 @@ def test_evening_summary():
             'run_id': run_id,
             'job': job_name,
             'timestamp': datetime.now().isoformat(),
+            'totals': {
+                'users_processed': users_processed,
+                'users_skipped': users_skipped,
+                'notifications_sent': notifications_sent,
+                'errors': errors
+            }
+        }
+    except Exception as e:
+        return {'error': str(e)}, 500
+
+@app.route('/test/bulk_deals')
+def test_bulk_deals():
+    """Test endpoint to manually trigger bulk deals monitoring without secret key"""
+    try:
+        sb = db.get_supabase_client(service_role=True)
+        if not sb:
+            return {'error': 'Supabase not configured'}, 500
+        
+        from datetime import datetime
+        import uuid
+        
+        # Check market status for info
+        now_ist = db.ist_now()
+        is_market_hours, market_open, market_close = db.ist_market_window(now_ist)
+        is_working_day = now_ist.weekday() < 5
+        
+        run_id = str(uuid.uuid4())
+        job_name = 'bulk_deals_test'
+        
+        # Get all users with scrips and recipients
+        scrip_rows = sb.table('monitored_scrips').select('user_id, bse_code, company_name').execute().data or []
+        rec_rows = sb.table('telegram_recipients').select('user_id, chat_id, user_name').execute().data or []
+        
+        # Build maps by user
+        scrips_by_user = {}
+        for r in scrip_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            scrips_by_user.setdefault(uid, []).append({'bse_code': r.get('bse_code'), 'company_name': r.get('company_name')})
+
+        recs_by_user = {}
+        for r in rec_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            recs_by_user.setdefault(uid, []).append({
+                'chat_id': r.get('chat_id'), 
+                'user_name': r.get('user_name', 'User')
+            })
+
+        users_processed = 0
+        notifications_sent = 0
+        users_skipped = 0
+        errors = []
+
+        print(f"💼 BULK DEALS TEST: Starting for {len(scrips_by_user)} users...")
+
+        for uid, scrips in scrips_by_user.items():
+            recipients = recs_by_user.get(uid) or []
+            if not scrips or not recipients:
+                users_skipped += 1
+                continue
+            try:
+                print(f"💼 BULK DEALS TEST: Processing user {uid[:8]} with {len(scrips)} scrips...")
+                
+                # Import and use bulk deals monitoring
+                from bulk_deals_monitor import send_bulk_deals_alerts
+                sent = send_bulk_deals_alerts(sb, uid, scrips, recipients)
+                
+                users_processed += 1
+                notifications_sent += sent
+                
+                print(f"💼 BULK DEALS TEST: User {uid[:8]} - sent {sent} notifications")
+                
+                # Log the run
+                try:
+                    user_uuid = uid if uid and len(uid) == 36 and '-' in uid else None
+                    sb.table('cron_run_logs').insert({
+                        'run_id': run_id,
+                        'job': job_name,
+                        'user_id': user_uuid,
+                        'processed': True,
+                        'notifications_sent': int(sent),
+                        'recipients': int(len(recipients)),
+                    }).execute()
+                except Exception as e:
+                    errors.append(f"Failed to log for user {uid}: {e}")
+                    
+            except Exception as e:
+                errors.append({"user_id": uid, "error": str(e)})
+                users_skipped += 1
+
+        return {
+            'success': True,
+            'forced_test': True,
+            'run_id': run_id,
+            'job': job_name,
+            'timestamp': datetime.now().isoformat(),
+            'market_info': {
+                'current_time': now_ist.strftime('%Y-%m-%d %H:%M:%S'),
+                'is_market_hours': is_market_hours,
+                'is_working_day': is_working_day,
+                'market_open': market_open.strftime('%H:%M'),
+                'market_close': market_close.strftime('%H:%M')
+            },
             'totals': {
                 'users_processed': users_processed,
                 'users_skipped': users_skipped,
