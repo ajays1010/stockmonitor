@@ -212,29 +212,33 @@ def rss_memory_manager():
 
 # Memory-Efficient RSS News Function
 def send_rss_news_optimized(sb, user_id, scrips, recipients):
-    """Ultra memory-efficient RSS news processing with timeout protection"""
+    """Ultra memory-efficient RSS news processing with aggressive timeout protection"""
     messages_sent = 0
     initial_memory = _get_memory_usage_fast()
     
     print(f"🧠 RSS MEMORY: Starting with {initial_memory}MB for user {user_id[:8]}...")
     
-    # Simple time tracking without signals
+    # Strict time tracking - much shorter limits
     import time
     start_time = time.time()
-    max_total_time = 20  # 20 seconds max for entire RSS processing
+    max_total_time = 15  # Reduced from 20 to 15 seconds max for entire RSS processing
     
     try:
-        # Process companies one at a time with aggressive cleanup
-        for i, scrip in enumerate(scrips):
+        # Process only FIRST 2 companies to minimize memory usage
+        limited_scrips = scrips[:2]  # Limit to first 2 companies only
+        
+        print(f"📰 RSS MEMORY: Processing {len(limited_scrips)} companies (limited from {len(scrips)})")
+        
+        for i, scrip in enumerate(limited_scrips):
             company_name = scrip.get('company_name', '')
             if not company_name:
                 continue
             
-            print(f"📰 RSS MEMORY: Processing {i+1}/{len(scrips)}: {company_name}")
+            print(f"📰 RSS MEMORY: Processing {i+1}/{len(limited_scrips)}: {company_name}")
             current_memory = _get_memory_usage_fast()
             
-            # Much stricter memory limit to prevent SIGKILL
-            if current_memory > 350:  # Reduced from 450MB to 350MB
+            # Very strict memory limit to prevent SIGKILL
+            if current_memory > 300:  # Reduced from 350MB to 300MB
                 print(f"🧠 MEMORY LIMIT REACHED: {current_memory}MB - skipping remaining companies")
                 break
             
@@ -252,40 +256,46 @@ def send_rss_news_optimized(sb, user_id, scrips, recipients):
                 messages_sent += company_messages
                 
                 # Aggressive cleanup after each company
-                gc.collect()
+                import gc
+                for _ in range(3):  # Multiple cleanup cycles
+                    gc.collect()
                 
                 after_memory = _get_memory_usage_fast()
                 print(f"🧠 Memory: {current_memory}MB → {after_memory}MB (sent {company_messages} messages)")
                 
-                # Extra cleanup if memory increased significantly
-                if after_memory > current_memory + 30:  # Reduced from 50MB to 30MB
-                    print(f"🧠 HIGH MEMORY INCREASE - forcing extra cleanup")
-                    for _ in range(5):  # Increased cleanup cycles
+                # Extra cleanup if memory increased at all
+                if after_memory > current_memory + 20:  # Reduced from 30MB to 20MB
+                    print(f"🧠 MEMORY INCREASE DETECTED - forcing extra cleanup")
+                    for _ in range(5):  # Extra cleanup cycles
                         gc.collect()
-                    time.sleep(1.0)  # Increased wait time
+                    time.sleep(0.5)  # Short wait
                     
                     # Check if cleanup worked
                     final_memory = _get_memory_usage_fast()
                     print(f"🧠 Cleanup result: {after_memory}MB → {final_memory}MB")
                     
-                    # If still high, stop processing
-                    if final_memory > 400:
+                    # If still high, stop processing immediately
+                    if final_memory > 350:  # Reduced threshold
                         print(f"🧠 MEMORY STILL HIGH: {final_memory}MB - stopping RSS processing")
                         break
                 
             except Exception as e:
                 print(f"❌ Error processing {company_name}: {e}")
-                gc.collect()  # Cleanup on error
+                # Cleanup on error
+                import gc
+                for _ in range(3):
+                    gc.collect()
                 continue
     
     except Exception as e:
         print(f"❌ RSS MEMORY ERROR: {e}")
-        import traceback
-        traceback.print_exc()
+        # Don't print full traceback to save memory/time
+        pass
     
     finally:
         # Final aggressive cleanup
-        for _ in range(3):
+        import gc
+        for _ in range(5):  # More cleanup cycles
             gc.collect()
         
         final_memory = _get_memory_usage_fast()
@@ -295,133 +305,140 @@ def send_rss_news_optimized(sb, user_id, scrips, recipients):
     return messages_sent
 
 def process_single_company_memory_safe(sb, user_id: str, company_name: str, recipients: List[Dict]) -> int:
-    """Process a single company with strict memory management and timeout protection"""
+    """Process a single company with strict memory management and simple timeout protection"""
     messages_sent = 0
     
     try:
-        # Simple time tracking for timeout
+        # Simple time tracking for timeout - much shorter limits
         import time
         start_time = time.time()
-        timeout_seconds = 12
-        # Import RSS fetcher directly to avoid memory-intensive enhanced monitor
-        from rss_news_fetcher import RSSNewsFetcher
+        timeout_seconds = 8  # Reduced from 12 to 8 seconds
         
-        # Create RSS fetcher instance (much more memory efficient)
-        rss_fetcher = RSSNewsFetcher()
-        
-        # Check memory before RSS fetch
+        # Check memory before starting
         pre_fetch_memory = _get_memory_usage_fast()
-        if pre_fetch_memory > 400:  # 400MB limit before even trying
+        if pre_fetch_memory > 350:  # Reduced from 400MB to 350MB
             print(f"🧠 MEMORY LIMIT: {pre_fetch_memory}MB - skipping RSS fetch for {company_name}")
             return 0
         
-        # Fetch news directly from RSS with memory limits and timeout check
-        print(f"🔍 RSS FETCH: Starting for {company_name} (memory: {pre_fetch_memory}MB)")
+        print(f"🔍 RSS FETCH: Starting for {company_name} (memory: {pre_fetch_memory}MB, timeout: {timeout_seconds}s)")
         
-        # Check timeout before RSS fetch
-        if time.time() - start_time > timeout_seconds:
-            raise TimeoutError(f"RSS processing timeout for {company_name}")
-        
-        news_result = rss_fetcher.fetch_comprehensive_rss_news(company_name)
-        
-        # Check timeout after RSS fetch
-        if time.time() - start_time > timeout_seconds:
-            raise TimeoutError(f"RSS processing timeout for {company_name}")
-        
-        # Check memory after fetch
-        post_fetch_memory = _get_memory_usage_fast()
-        print(f"🔍 RSS FETCH: Completed for {company_name} (memory: {pre_fetch_memory}MB → {post_fetch_memory}MB)")
-        
-        # If memory spiked too much, force cleanup
-        if post_fetch_memory > pre_fetch_memory + 100:  # 100MB spike
-            print(f"🧠 MEMORY SPIKE DETECTED: {post_fetch_memory - pre_fetch_memory}MB - forcing cleanup")
-            import gc
-            for _ in range(3):
-                gc.collect()
-            print(f"🧠 After cleanup: {_get_memory_usage_fast()}MB")
-        
-        # Filter for today's articles only
-        if news_result.get('success'):
-            all_articles = news_result.get('articles', [])
-            today_articles = []
+        # Use lightweight RSS processing instead of heavy fetcher
+        try:
+            # Simple RSS fetch without heavy dependencies
+            import requests
+            import feedparser
+            from urllib.parse import quote_plus
             
-            from datetime import datetime
-            today = datetime.now().date()
+            # Check timeout before starting
+            if time.time() - start_time > timeout_seconds:
+                print(f"⏰ TIMEOUT: RSS processing for {company_name} exceeded {timeout_seconds}s before starting")
+                return 0
             
-            for article in all_articles:
+            # Single search query to minimize processing
+            search_query = f'"{company_name}" India stock news'
+            search_encoded = quote_plus(search_query)
+            url = f'https://news.google.com/rss/search?q={search_encoded}&hl=en&gl=IN&ceid=IN:en'
+            
+            headers = {'User-Agent': 'Mozilla/5.0 (compatible; NewsBot/1.0)'}
+            
+            # Quick fetch with short timeout
+            response = requests.get(url, headers=headers, timeout=5)
+            
+            # Check timeout after fetch
+            if time.time() - start_time > timeout_seconds:
+                print(f"⏰ TIMEOUT: RSS processing for {company_name} exceeded {timeout_seconds}s after fetch")
+                return 0
+            
+            if response.status_code != 200:
+                print(f"❌ RSS fetch failed for {company_name}: HTTP {response.status_code}")
+                return 0
+            
+            # Parse feed quickly
+            feed = feedparser.parse(response.content)
+            
+            # Check timeout after parsing
+            if time.time() - start_time > timeout_seconds:
+                print(f"⏰ TIMEOUT: RSS processing for {company_name} exceeded {timeout_seconds}s after parsing")
+                return 0
+            
+            # Process only first 3 entries to save time
+            articles = []
+            for entry in feed.entries[:3]:
                 # Check timeout during processing
                 if time.time() - start_time > timeout_seconds:
-                    raise TimeoutError(f"RSS processing timeout for {company_name}")
+                    print(f"⏰ TIMEOUT: RSS processing for {company_name} exceeded {timeout_seconds}s during article processing")
+                    break
                 
-                pub_date_str = article.get('pubDate', article.get('published_at', ''))
-                if pub_date_str:
-                    try:
-                        # Simple date parsing for today's filter
-                        from dateutil import parser
-                        dt_parsed = parser.parse(pub_date_str)
-                        if dt_parsed.date() == today:
-                            today_articles.append(article)
-                    except:
-                        # If date parsing fails, include the article
-                        today_articles.append(article)
-                else:
-                    # If no date, include the article
-                    today_articles.append(article)
+                title = entry.get('title', '').strip()
+                link = entry.get('link', '').strip()
+                pub_date = entry.get('published', '')
+                
+                if not title or len(title) < 15:
+                    continue
+                
+                # Quick relevance check
+                title_lower = title.lower()
+                company_lower = company_name.lower()
+                if company_lower not in title_lower:
+                    continue
+                
+                # Extract source from Google News title format
+                source = 'Google News'
+                if ' - ' in title:
+                    parts = title.split(' - ')
+                    if len(parts) >= 2:
+                        source = parts[-1].strip()
+                        title = ' - '.join(parts[:-1]).strip()
+                
+                articles.append({
+                    'title': title[:100],  # Truncate to save memory
+                    'source': source,
+                    'link': link,
+                    'pubDate': pub_date,
+                    'company': company_name
+                })
             
-            # Update result with filtered articles
-            news_result['articles'] = today_articles
-            news_result['success'] = len(today_articles) > 0
-        
-        if not news_result.get('success'):
-            del rss_fetcher
+            # Check memory after processing
+            post_fetch_memory = _get_memory_usage_fast()
+            print(f"🔍 RSS FETCH: Completed for {company_name} (memory: {pre_fetch_memory}MB → {post_fetch_memory}MB, articles: {len(articles)})")
+            
+            if not articles:
+                return 0
+            
+            # Process recipients quickly
+            for recipient in recipients:
+                try:
+                    # Check timeout before each recipient
+                    if time.time() - start_time > timeout_seconds:
+                        print(f"⏰ TIMEOUT: RSS processing for {company_name} exceeded {timeout_seconds}s during recipient processing")
+                        break
+                    
+                    recipient_messages = process_single_recipient_memory_safe(
+                        sb, user_id, company_name, articles, recipient
+                    )
+                    messages_sent += recipient_messages
+                    
+                except Exception as e:
+                    print(f"❌ Error processing recipient {recipient.get('chat_id', 'unknown')}: {e}")
+                    continue
+            
+            # Clear from memory
+            articles.clear()
+            del articles
+            
+        except requests.Timeout:
+            print(f"⏰ TIMEOUT: RSS request timeout for {company_name}")
+            return 0
+        except Exception as e:
+            print(f"❌ Error in RSS processing for {company_name}: {e}")
             return 0
         
-        articles = news_result.get('articles', [])
-        if not articles:
-            del rss_fetcher, news_result
-            return 0
-        
-        # Optimized logging - show total and sources with positive counts only
-        if articles:
-            sources = {}
-            for article in articles:
-                source = article.get('source', 'Unknown')
-                sources[source] = sources.get(source, 0) + 1
-            
-            # Only show sources with articles found
-            positive_sources = [f"{source}: {count}" for source, count in sources.items() if count > 0]
-            source_summary = ", ".join(positive_sources) if positive_sources else "No sources"
-            print(f"📰 {company_name}: {len(articles)} articles ({source_summary})")
-        else:
-            print(f"📰 {company_name}: 0 articles")
-        
-        # Process recipients one at a time
-        for recipient in recipients:
-            try:
-                recipient_messages = process_single_recipient_memory_safe(
-                    sb, user_id, company_name, articles, recipient
-                )
-                messages_sent += recipient_messages
-                
-                # Cleanup after each recipient
-                gc.collect()
-                
-            except Exception as e:
-                print(f"❌ Error processing recipient {recipient.get('chat_id', 'unknown')}: {e}")
-                continue
-        
-        # Clear from memory
-        articles.clear()
-        del articles, news_result, rss_fetcher
-        
-    except TimeoutError as e:
-        print(f"⏰ TIMEOUT: RSS processing for {company_name} exceeded 15 seconds - skipping")
-        return 0
     except Exception as e:
         print(f"❌ Error in process_single_company_memory_safe: {e}")
     finally:
-        # No signal cleanup needed for time-based approach
-        pass
+        # Force garbage collection
+        import gc
+        gc.collect()
     
     return messages_sent
 
