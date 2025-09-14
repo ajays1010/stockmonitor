@@ -955,25 +955,42 @@ def process_rss_globally_optimized(sb, all_users_data: Dict) -> int:
         
         # Step 2: Get global rotation state
         try:
-            result = sb.table('global_rss_rotation').select('last_company_index, updated_at').execute()
+            result = sb.table('global_rss_rotation').select('id, last_company_index, total_companies, updated_at, last_batch_companies').execute()
             
             global_index = 0
-            if result.data:
-                global_index = result.data[0].get('last_company_index', 0)
-                last_updated = result.data[0].get('updated_at')
+            existing_record = None
+            
+            if result.data and len(result.data) > 0:
+                existing_record = result.data[0]
+                global_index = existing_record.get('last_company_index', 0)
+                stored_total = existing_record.get('total_companies', 0)
+                last_updated = existing_record.get('updated_at')
                 
-                # Reset if it's been too long (1 hour)
+                print(f"📊 CURRENT STATE: index={global_index}, stored_total={stored_total}, actual_total={len(unique_companies)}")
+                
+                # Reset if it's been too long (1 hour) OR if company count changed significantly
                 if last_updated:
                     try:
                         last_time = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
-                        if datetime.now().timestamp() - last_time.timestamp() > 3600:
+                        time_diff = datetime.now().timestamp() - last_time.timestamp()
+                        
+                        # Reset conditions: timeout OR significant company count change
+                        if time_diff > 3600:
                             global_index = 0
-                            print("🔄 Reset global rotation due to timeout")
-                    except:
+                            print(f"🔄 Reset global rotation due to timeout ({time_diff/60:.1f} minutes)")
+                        elif abs(stored_total - len(unique_companies)) > 2:
+                            global_index = 0
+                            print(f"🔄 Reset global rotation due to company count change ({stored_total} → {len(unique_companies)})")
+                    except Exception as parse_error:
+                        print(f"Warning: Could not parse last_updated time: {parse_error}")
                         global_index = 0
+            else:
+                print("📊 No existing rotation record found - starting fresh")
+                
         except Exception as e:
             print(f"Warning: Could not get global rotation state: {e}")
             global_index = 0
+            existing_record = None
         
         # Step 3: Calculate next batch
         start_index = global_index % len(unique_companies)
@@ -992,24 +1009,54 @@ def process_rss_globally_optimized(sb, all_users_data: Dict) -> int:
         print(f"🔄 GLOBAL ROTATION: Processing companies {start_index}-{start_index+len(batch_companies)-1} of {len(unique_companies)}")
         print(f"📊 COMPANIES IN BATCH: {', '.join(batch_companies)}")
         
-        # Step 4: Update global rotation state
+        # Step 4: Update global rotation state with comprehensive data
         try:
+            from datetime import datetime
             current_time = datetime.now().isoformat()
-            if result.data:
-                sb.table('global_rss_rotation').update({
-                    'last_company_index': next_index,
-                    'total_companies': len(unique_companies),
-                    'updated_at': current_time
-                }).eq('id', result.data[0]['id']).execute()
+            
+            # Prepare update data
+            update_data = {
+                'last_company_index': next_index,
+                'total_companies': len(unique_companies),
+                'last_batch_companies': batch_companies,  # Store actual batch processed
+                'updated_at': current_time
+            }
+            
+            print(f"📊 UPDATING ROTATION STATE:")
+            print(f"   - last_company_index: {global_index} → {next_index}")
+            print(f"   - total_companies: {len(unique_companies)}")
+            print(f"   - last_batch_companies: {batch_companies}")
+            print(f"   - updated_at: {current_time}")
+            
+            if existing_record and existing_record.get('id'):
+                # Update existing record
+                record_id = existing_record.get('id')
+                update_result = sb.table('global_rss_rotation').update(update_data).eq('id', record_id).execute()
+                
+                if update_result.data:
+                    print(f"✅ SUCCESSFULLY UPDATED global rotation record ID {record_id}")
+                    print(f"   New state: index={next_index}, total={len(unique_companies)}")
+                else:
+                    print(f"⚠️ Update returned no data - record ID {record_id}")
+                    
             else:
-                sb.table('global_rss_rotation').insert({
-                    'last_company_index': next_index,
-                    'total_companies': len(unique_companies),
-                    'updated_at': current_time
-                }).execute()
-            print(f"✅ Updated global rotation: next_index={next_index}")
+                # Insert new record (should only happen once)
+                insert_result = sb.table('global_rss_rotation').insert(update_data).execute()
+                
+                if insert_result.data:
+                    new_id = insert_result.data[0].get('id', 'unknown')
+                    print(f"✅ CREATED new global rotation record ID {new_id}")
+                    print(f"   Initial state: index={next_index}, total={len(unique_companies)}")
+                else:
+                    print(f"⚠️ Insert returned no data")
+                    
         except Exception as e:
-            print(f"Warning: Could not update global rotation: {e}")
+            print(f"❌ ERROR updating global rotation: {e}")
+            print(f"   Data attempted: {update_data}")
+            import traceback
+            traceback.print_exc()
+            # Continue processing without rotation tracking
+            print(f"📊 Processing will continue with companies: {', '.join(batch_companies)}")
         
         # Step 5: Fetch news for each company ONCE
         company_news_cache = {}
