@@ -132,24 +132,31 @@ def get_next_companies_to_process(sb, user_id: str, scrips: List[Dict], batch_si
                 except:
                     last_index = 0
         
-        # Calculate next batch - FIXED LOGIC
+        # Calculate next batch - FIXED LOGIC with duplicate prevention
         start_index = last_index % len(scrips)
         batch = []
         
-        # Always get exactly batch_size companies, wrapping around if needed
-        for i in range(batch_size):
+        # Adjust batch size if user has fewer companies than requested batch size
+        effective_batch_size = min(batch_size, len(scrips))
+        
+        # Get companies without duplicates in the same batch
+        for i in range(effective_batch_size):
             company_index = (start_index + i) % len(scrips)
             batch.append(scrips[company_index])
         
         # Calculate next starting index (where next run should start)
-        next_index = (start_index + batch_size) % len(scrips)
+        next_index = (start_index + effective_batch_size) % len(scrips)
         
         # Debug information
-        batch_indices = [(start_index + i) % len(scrips) for i in range(batch_size)]
-        print(f"📰 ROTATION DEBUG: total_companies={len(scrips)}, batch_size={batch_size}")
+        batch_indices = [(start_index + i) % len(scrips) for i in range(effective_batch_size)]
+        print(f"📰 ROTATION DEBUG: total_companies={len(scrips)}, requested_batch_size={batch_size}, effective_batch_size={effective_batch_size}")
         print(f"📰 ROTATION DEBUG: last_index={last_index}, start_index={start_index}")
         print(f"📰 ROTATION DEBUG: processing indices: {batch_indices}")
         print(f"📰 ROTATION DEBUG: next_index will be: {next_index}")
+        
+        # Warning if user has fewer companies than batch size
+        if effective_batch_size < batch_size:
+            print(f"⚠️ USER HAS ONLY {len(scrips)} COMPANIES - using effective batch size {effective_batch_size}")
         
         # Update tracking - with duplicate cleanup
         try:
@@ -909,6 +916,244 @@ def test_consolidated_rss():
     print(f"✅ Cache stats: {stats}")
     
     print("🎉 Consolidated RSS test completed!")
+
+# ========================================================================================
+# GLOBAL OPTIMIZATION SYSTEM
+# ========================================================================================
+
+def process_rss_globally_optimized(sb, all_users_data: Dict) -> int:
+    """
+    GLOBALLY OPTIMIZED RSS PROCESSING
+    Processes unique companies once and distributes to all interested users.
+    Replaces per-user processing to eliminate duplicate API calls.
+    """
+    from collections import defaultdict
+    
+    total_messages = 0
+    batch_size = 3
+    
+    try:
+        print(f"🌍 GLOBAL RSS: Starting optimized processing for {len(all_users_data)} users")
+        
+        # Step 1: Build global unique company list
+        all_companies = set()
+        company_to_users = defaultdict(list)
+        
+        for user_id, user_data in all_users_data.items():
+            user_companies = set()
+            for scrip in user_data['scrips']:
+                company_name = scrip.get('company_name')
+                if company_name:
+                    all_companies.add(company_name)
+                    user_companies.add(company_name)
+                    company_to_users[company_name].append(user_id)
+            
+            print(f"👤 User {user_id[:8]}: {len(user_companies)} companies")
+        
+        unique_companies = sorted(list(all_companies))
+        print(f"🌍 Total unique companies across all users: {len(unique_companies)}")
+        
+        # Step 2: Get global rotation state
+        try:
+            result = sb.table('global_rss_rotation').select('last_company_index, updated_at').execute()
+            
+            global_index = 0
+            if result.data:
+                global_index = result.data[0].get('last_company_index', 0)
+                last_updated = result.data[0].get('updated_at')
+                
+                # Reset if it's been too long (1 hour)
+                if last_updated:
+                    try:
+                        last_time = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
+                        if datetime.now().timestamp() - last_time.timestamp() > 3600:
+                            global_index = 0
+                            print("🔄 Reset global rotation due to timeout")
+                    except:
+                        global_index = 0
+        except Exception as e:
+            print(f"Warning: Could not get global rotation state: {e}")
+            global_index = 0
+        
+        # Step 3: Calculate next batch
+        start_index = global_index % len(unique_companies)
+        end_index = min(start_index + batch_size, len(unique_companies))
+        
+        batch_companies = unique_companies[start_index:end_index]
+        
+        # Wrap around if needed
+        if len(batch_companies) < batch_size and start_index > 0:
+            remaining = batch_size - len(batch_companies)
+            batch_companies.extend(unique_companies[:remaining])
+            next_index = remaining
+        else:
+            next_index = end_index % len(unique_companies)
+        
+        print(f"🔄 GLOBAL ROTATION: Processing companies {start_index}-{start_index+len(batch_companies)-1} of {len(unique_companies)}")
+        print(f"📊 COMPANIES IN BATCH: {', '.join(batch_companies)}")
+        
+        # Step 4: Update global rotation state
+        try:
+            current_time = datetime.now().isoformat()
+            if result.data:
+                sb.table('global_rss_rotation').update({
+                    'last_company_index': next_index,
+                    'total_companies': len(unique_companies),
+                    'updated_at': current_time
+                }).eq('id', result.data[0]['id']).execute()
+            else:
+                sb.table('global_rss_rotation').insert({
+                    'last_company_index': next_index,
+                    'total_companies': len(unique_companies),
+                    'updated_at': current_time
+                }).execute()
+            print(f"✅ Updated global rotation: next_index={next_index}")
+        except Exception as e:
+            print(f"Warning: Could not update global rotation: {e}")
+        
+        # Step 5: Fetch news for each company ONCE
+        company_news_cache = {}
+        
+        for company_name in batch_companies:
+            print(f"📰 FETCHING: {company_name}")
+            
+            try:
+                # Fetch news once for this company
+                raw_articles = fetch_google_news_rss(company_name)
+                
+                # Filter for relevance
+                relevant_articles = []
+                for article in raw_articles:
+                    if is_relevant_news(article, company_name):
+                        relevant_articles.append(article)
+                
+                company_news_cache[company_name] = relevant_articles
+                interested_users = len(company_to_users[company_name])
+                
+                print(f"📰 {company_name}: {len(raw_articles)} raw → {len(relevant_articles)} relevant → {interested_users} users interested")
+                
+            except Exception as e:
+                print(f"❌ Error fetching {company_name}: {e}")
+                company_news_cache[company_name] = []
+        
+        # Step 6: Distribute cached news to interested users
+        for company_name, articles in company_news_cache.items():
+            if not articles:
+                continue
+            
+            interested_user_ids = company_to_users[company_name]
+            print(f"📤 DISTRIBUTING {company_name}: {len(articles)} articles to {len(interested_user_ids)} users")
+            
+            for user_id in interested_user_ids:
+                user_data = all_users_data[user_id]
+                recipients = user_data['recipients']
+                
+                try:
+                    # Process for this specific user
+                    user_messages = process_company_for_user_optimized(
+                        sb, user_id, company_name, articles, recipients
+                    )
+                    total_messages += user_messages
+                    
+                    if user_messages > 0:
+                        print(f"📤 {company_name} → User {user_id[:8]}: {user_messages} messages")
+                    
+                except Exception as e:
+                    print(f"❌ Error processing {company_name} for user {user_id[:8]}: {e}")
+        
+        print(f"🌍 GLOBAL RSS COMPLETED: {total_messages} total messages sent")
+        
+        return total_messages
+        
+    except Exception as e:
+        print(f"❌ GLOBAL RSS ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return 0
+
+def process_company_for_user_optimized(sb, user_id: str, company_name: str, articles: List[Dict], recipients: List[Dict]) -> int:
+    """Process cached articles for a specific user with duplicate checking"""
+    try:
+        messages_sent = 0
+        
+        # Process each recipient separately
+        for recipient in recipients:
+            recipient_id = recipient['chat_id']
+            user_name = recipient.get('user_name', 'User')
+            
+            # Filter articles for this specific recipient
+            new_articles = []
+            
+            for article in articles:
+                # Generate unique hash for this article + recipient combination
+                article_hash = generate_article_hash(article, company_name, recipient_id)
+                
+                # Check memory cache (fastest)
+                if is_duplicate_in_memory(article_hash):
+                    continue
+                
+                # Check database for duplicates
+                if is_duplicate_in_database(sb, article, company_name, user_id):
+                    mark_sent_in_memory(article_hash)
+                    continue
+                
+                # Article is new and relevant
+                new_articles.append(article)
+            
+            if not new_articles:
+                continue
+            
+            # Format and send message
+            telegram_message = format_clean_rss_message(company_name, new_articles)
+            
+            try:
+                from database import send_telegram_message_with_user_name
+                if send_telegram_message_with_user_name(recipient_id, telegram_message, user_name):
+                    messages_sent += 1
+                    
+                    # Mark articles as sent
+                    for article in new_articles:
+                        article_hash = generate_article_hash(article, company_name, recipient_id)
+                        mark_sent_in_memory(article_hash)
+                        record_sent_in_database(sb, article, company_name, user_id)
+                    
+            except Exception as e:
+                print(f"❌ Error sending to {user_name}: {e}")
+        
+        return messages_sent
+        
+    except Exception as e:
+        print(f"❌ Error in process_company_for_user_optimized: {e}")
+        return 0
+
+# ========================================================================================
+# GLOBAL RSS DATABASE SCHEMA
+# ========================================================================================
+
+GLOBAL_RSS_SQL_SCHEMA = """
+-- GLOBAL RSS ROTATION TABLE
+CREATE TABLE IF NOT EXISTS global_rss_rotation (
+    id SERIAL PRIMARY KEY,
+    last_company_index INTEGER NOT NULL DEFAULT 0,
+    total_companies INTEGER DEFAULT 0,
+    last_batch_companies TEXT[], -- Store last batch for debugging
+    updated_at TIMESTAMP DEFAULT NOW(),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Insert initial row (only one row should exist)
+INSERT INTO global_rss_rotation (last_company_index, total_companies) 
+VALUES (0, 0) 
+ON CONFLICT DO NOTHING;
+
+-- Index for faster lookups
+CREATE INDEX IF NOT EXISTS idx_global_rss_rotation_updated ON global_rss_rotation(updated_at);
+
+-- Comments
+COMMENT ON TABLE global_rss_rotation IS 'Global rotation state for RSS processing to avoid duplicate company fetches';
+COMMENT ON COLUMN global_rss_rotation.last_company_index IS 'Index of last processed company in global unique company list';
+COMMENT ON COLUMN global_rss_rotation.total_companies IS 'Total number of unique companies across all users';
+"""
 
 if __name__ == "__main__":
     test_consolidated_rss()

@@ -1188,42 +1188,56 @@ def cron_rss_news():
         totals = {"users_processed": 0, "notifications_sent": 0, "users_skipped": 0}
         errors = []
 
+        # Check system memory before starting any RSS processing
+        system_memory = _get_memory_usage_fast()
+        if system_memory > 250:  # Very conservative limit
+            print(f"🚨 MEMORY PROTECTION: System memory {system_memory}MB too high - skipping all RSS processing")
+            return jsonify({"ok": True, "message": "Skipped due to high memory usage", "memory_mb": system_memory, **totals, "errors": errors})
+        
+        print(f"🌍 GLOBAL RSS: Starting optimized processing (memory: {system_memory}MB)")
+        
+        # Build all users data for global processing
+        all_users_data = {}
         for uid, scrips in scrips_by_user.items():
             recipients = recs_by_user.get(uid) or []
-            if not scrips or not recipients:
+            if scrips and recipients:
+                all_users_data[uid] = {
+                    'scrips': scrips,
+                    'recipients': recipients
+                }
+            else:
                 totals["users_skipped"] += 1
-                continue
+        
+        if all_users_data:
             try:
-                # Check system memory before starting any RSS processing
-                system_memory = _get_memory_usage_fast()
-                if system_memory > 250:  # Very conservative limit
-                    print(f"🚨 MEMORY PROTECTION: System memory {system_memory}MB too high - skipping RSS for user {uid[:8]}")
-                    sent = 0
-                else:
-                    print(f"📰 LIGHTWEIGHT RSS: Starting for user {uid[:8]}... (memory: {system_memory}MB)")
-                    sent = lightweight_rss_news_processing(sb, uid, scrips, recipients)
-                    print(f"📰 LIGHTWEIGHT RSS: Completed - {sent} messages sent")
+                # Use global optimization system from consolidated RSS file
+                from consolidated_rss_news import process_rss_globally_optimized
+                total_sent = process_rss_globally_optimized(sb, all_users_data)
                 
-                totals["users_processed"] += 1
-                totals["notifications_sent"] += sent
+                totals["users_processed"] = len(all_users_data)
+                totals["notifications_sent"] = total_sent
                 
-                # Log the run
-                try:
-                    user_uuid = uid if uid and len(uid) == 36 and '-' in uid else None
-                    sb.table('cron_run_logs').insert({
-                        'run_id': run_id,
-                        'job': 'rss_news_lightweight',
-                        'user_id': user_uuid,
-                        'processed': True,
-                        'notifications_sent': int(sent),
-                        'recipients': int(len(recipients)),
-                    }).execute()
-                except Exception as e:
-                    errors.append(f"Log error for user {uid}: {e}")
-                    
+                print(f"🌍 GLOBAL RSS: Completed - {total_sent} total messages sent to {len(all_users_data)} users")
+                
             except Exception as e:
-                errors.append({"user_id": uid, "error": str(e)})
-                print(f"❌ RSS ERROR for user {uid}: {e}")
+                errors.append(f"Global RSS processing error: {str(e)}")
+                print(f"❌ GLOBAL RSS ERROR: {e}")
+        
+        # Log the runs for each user
+        for uid in all_users_data.keys():
+            try:
+                user_uuid = uid if uid and len(uid) == 36 and '-' in uid else None
+                sb.table('cron_run_logs').insert({
+                    'run_id': run_id,
+                    'job': 'global_rss_news',
+                    'user_id': user_uuid,
+                    'processed': True,
+                    'notifications_sent': 0,  # Global count, not per-user
+                    'recipients': len(recs_by_user.get(uid, [])),
+                }).execute()
+            except Exception as e:
+                errors.append(f"Log error for user {uid}: {e}")
+        
 
         return jsonify({"ok": True, **totals, "errors": errors})
     except Exception as e:
@@ -1417,102 +1431,245 @@ def get_next_companies_to_process(sb, user_id: str, scrips: List[Dict], batch_si
         print(f"Warning: RSS tracking failed, using first {batch_size} companies: {e}")
         return scrips[:batch_size]
 
-def lightweight_rss_news_processing(sb, user_id: str, scrips: List[Dict], recipients: List[Dict]) -> int:
-    """RSS processing with company rotation and duplicate prevention"""
-    messages_sent = 0
+def process_rss_globally_optimized(sb, all_users_data: Dict) -> int:
+    """
+    GLOBALLY OPTIMIZED RSS PROCESSING
+    Processes unique companies once and distributes to all interested users.
+    Replaces per-user processing to eliminate duplicate API calls.
+    """
+    from collections import defaultdict
+    
+    total_messages = 0
+    batch_size = 3
     
     try:
-        import requests
-        import feedparser
-        from urllib.parse import quote_plus
-        from datetime import datetime, timedelta
-        import hashlib
+        print(f"🌍 GLOBAL RSS: Starting optimized processing for {len(all_users_data)} users")
         
-        # Process companies using rotation system
-        if not scrips:
-            return 0
+        # Step 1: Build global unique company list
+        all_companies = set()
+        company_to_users = defaultdict(list)
+        
+        for user_id, user_data in all_users_data.items():
+            user_companies = set()
+            for scrip in user_data['scrips']:
+                company_name = scrip.get('company_name')
+                if company_name:
+                    all_companies.add(company_name)
+                    user_companies.add(company_name)
+                    company_to_users[company_name].append(user_id)
             
-        # Get next batch of companies to process
-        limited_scrips = get_next_companies_to_process(sb, user_id, scrips, batch_size=2)
-        print(f"📰 LIGHTWEIGHT RSS: Processing {len(limited_scrips)} companies via rotation")
+            print(f"👤 User {user_id[:8]}: {len(user_companies)} companies")
         
-        for scrip in limited_scrips:
-            company_name = scrip.get('company_name', '')
-            if not company_name:
+        unique_companies = sorted(list(all_companies))
+        print(f"🌍 Total unique companies across all users: {len(unique_companies)}")
+        
+        # Step 2: Get global rotation state
+        try:
+            result = sb.table('global_rss_rotation').select('last_company_index, updated_at').execute()
+            
+            global_index = 0
+            if result.data:
+                global_index = result.data[0].get('last_company_index', 0)
+                last_updated = result.data[0].get('updated_at')
+                
+                # Reset if it's been too long (1 hour)
+                if last_updated:
+                    try:
+                        from datetime import datetime
+                        last_time = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
+                        if datetime.now().timestamp() - last_time.timestamp() > 3600:
+                            global_index = 0
+                            print("🔄 Reset global rotation due to timeout")
+                    except:
+                        global_index = 0
+        except Exception as e:
+            print(f"Warning: Could not get global rotation state: {e}")
+            global_index = 0
+        
+        # Step 3: Calculate next batch
+        start_index = global_index % len(unique_companies)
+        end_index = min(start_index + batch_size, len(unique_companies))
+        
+        batch_companies = unique_companies[start_index:end_index]
+        
+        # Wrap around if needed
+        if len(batch_companies) < batch_size and start_index > 0:
+            remaining = batch_size - len(batch_companies)
+            batch_companies.extend(unique_companies[:remaining])
+            next_index = remaining
+        else:
+            next_index = end_index % len(unique_companies)
+        
+        print(f"🔄 GLOBAL ROTATION: Processing companies {start_index}-{start_index+len(batch_companies)-1} of {len(unique_companies)}")
+        print(f"📊 COMPANIES IN BATCH: {', '.join(batch_companies)}")
+        
+        # Step 4: Update global rotation state
+        try:
+            current_time = datetime.now().isoformat()
+            if result.data:
+                sb.table('global_rss_rotation').update({
+                    'last_company_index': next_index,
+                    'total_companies': len(unique_companies),
+                    'updated_at': current_time
+                }).eq('id', result.data[0]['id']).execute()
+            else:
+                sb.table('global_rss_rotation').insert({
+                    'last_company_index': next_index,
+                    'total_companies': len(unique_companies),
+                    'updated_at': current_time
+                }).execute()
+            print(f"✅ Updated global rotation: next_index={next_index}")
+        except Exception as e:
+            print(f"Warning: Could not update global rotation: {e}")
+        
+        # Step 5: Fetch news for each company ONCE
+        company_news_cache = {}
+        
+        for company_name in batch_companies:
+            print(f"📰 FETCHING: {company_name}")
+            
+            try:
+                from consolidated_rss_news import fetch_google_news_rss, is_relevant_news
+                
+                # Fetch news once for this company
+                raw_articles = fetch_google_news_rss(company_name)
+                
+                # Filter for relevance
+                relevant_articles = []
+                for article in raw_articles:
+                    if is_relevant_news(article, company_name):
+                        relevant_articles.append(article)
+                
+                company_news_cache[company_name] = relevant_articles
+                interested_users = len(company_to_users[company_name])
+                
+                print(f"📰 {company_name}: {len(raw_articles)} raw → {len(relevant_articles)} relevant → {interested_users} users interested")
+                
+            except Exception as e:
+                print(f"❌ Error fetching {company_name}: {e}")
+                company_news_cache[company_name] = []
+        
+        # Step 6: Distribute cached news to interested users
+        for company_name, articles in company_news_cache.items():
+            if not articles:
                 continue
             
-            print(f"📰 Processing with duplicate prevention: {company_name}")
-        
-        # Multiple search queries to catch important news
-        search_queries = [
-            f'"{company_name}" India stock',
-            f'"{company_name}" order',
-            f'"{company_name}" news'
-        ]
-        
-        all_articles = []
-        headers = {'User-Agent': 'Mozilla/5.0 (compatible; NewsBot/1.0)'}
-        
-        # Try each search query
-        for search_query in search_queries:
-            try:
-                search_encoded = quote_plus(search_query)
-                url = f'https://news.google.com/rss/search?q={search_encoded}&hl=en&gl=IN&ceid=IN:en'
+            interested_user_ids = company_to_users[company_name]
+            print(f"📤 DISTRIBUTING {company_name}: {len(articles)} articles to {len(interested_user_ids)} users")
+            
+            for user_id in interested_user_ids:
+                user_data = all_users_data[user_id]
+                recipients = user_data['recipients']
                 
-                response = requests.get(url, headers=headers, timeout=8)
-                if response.status_code != 200:
+                try:
+                    # Process for this specific user
+                    user_messages = process_company_for_user_optimized(
+                        sb, user_id, company_name, articles, recipients
+                    )
+                    total_messages += user_messages
+                    
+                    if user_messages > 0:
+                        print(f"📤 {company_name} → User {user_id[:8]}: {user_messages} messages")
+                    
+                except Exception as e:
+                    print(f"❌ Error processing {company_name} for user {user_id[:8]}: {e}")
+        
+        print(f"🌍 GLOBAL RSS COMPLETED: {total_messages} total messages sent")
+        
+        # Step 7: Cleanup old per-user tracking entries (if they exist)
+        try:
+            old_entries = sb.table('rss_processing_tracker').select('id, user_id').execute()
+            if old_entries.data and len(old_entries.data) > len(all_users_data):
+                print(f"🧹 Cleaning up {len(old_entries.data)} old tracking entries...")
+                sb.table('rss_processing_tracker').delete().execute()
+                print("🧹 Cleaned up old per-user tracking entries")
+        except Exception as e:
+            print(f"Note: Could not clean old tracking entries: {e}")
+        
+        return total_messages
+        
+    except Exception as e:
+        print(f"❌ GLOBAL RSS ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return 0
+
+def process_company_for_user_optimized(sb, user_id: str, company_name: str, articles: List[Dict], recipients: List[Dict]) -> int:
+    """Process cached articles for a specific user with duplicate checking"""
+    try:
+        from consolidated_rss_news import (
+            generate_article_hash, is_duplicate_in_memory, is_duplicate_in_database,
+            mark_sent_in_memory, record_sent_in_database, format_clean_rss_message
+        )
+        
+        messages_sent = 0
+        
+        # Process each recipient separately
+        for recipient in recipients:
+            recipient_id = recipient['chat_id']
+            user_name = recipient.get('user_name', 'User')
+            
+            # Filter articles for this specific recipient
+            new_articles = []
+            
+            for article in articles:
+                # Generate unique hash for this article + recipient combination
+                article_hash = generate_article_hash(article, company_name, recipient_id)
+                
+                # Check memory cache (fastest)
+                if is_duplicate_in_memory(article_hash):
                     continue
                 
-                feed = feedparser.parse(response.content)
+                # Check database for duplicates
+                if is_duplicate_in_database(sb, article, company_name, user_id):
+                    mark_sent_in_memory(article_hash)
+                    continue
                 
-                # Process first 5 entries from each query
-                for entry in feed.entries[:5]:
-                    title = entry.get('title', '').strip()
-                    link = entry.get('link', '').strip()
-                    pub_date = entry.get('published', '')
+                # Article is new and relevant
+                new_articles.append(article)
+            
+            if not new_articles:
+                continue
+            
+            # Format and send message
+            telegram_message = format_clean_rss_message(company_name, new_articles)
+            
+            try:
+                from database import send_telegram_message_with_user_name
+                if send_telegram_message_with_user_name(recipient_id, telegram_message, user_name):
+                    messages_sent += 1
                     
-                    if not title or len(title) < 15:
-                        continue
-                    
-                    # Enhanced relevance check
-                    if not is_news_relevant_simple(title, company_name):
-                        continue
-                    
-                    # Extract source from Google News title format
-                    source = 'Google News'
-                    if ' - ' in title:
-                        parts = title.split(' - ')
-                        if len(parts) >= 2:
-                            source = parts[-1].strip()
-                            title = ' - '.join(parts[:-1]).strip()
-                    
-                    all_articles.append({
-                        'title': title[:120],
-                        'source': source,
-                        'link': link,
-                        'pubDate': pub_date,
-                        'company': company_name
-                    })
+                    # Mark articles as sent
+                    for article in new_articles:
+                        article_hash = generate_article_hash(article, company_name, recipient_id)
+                        mark_sent_in_memory(article_hash)
+                        record_sent_in_database(sb, article, company_name, user_id)
                     
             except Exception as e:
-                print(f"  ❌ Query '{search_query}' failed: {e}")
-                continue
+                print(f"❌ Error sending to {user_name}: {e}")
         
-        # Use the consolidated RSS system (single file, all functionality)
-        from consolidated_rss_news import process_consolidated_rss_news
-        messages_sent = process_consolidated_rss_news(sb, user_id, limited_scrips, recipients)
+        return messages_sent
         
-        print(f"📰 LIGHTWEIGHT RSS: Completed processing {len(limited_scrips)} companies")
-    
     except Exception as e:
-        print(f"❌ RSS processing error: {e}")
+        print(f"❌ Error in process_company_for_user_optimized: {e}")
+        return 0
+
+def lightweight_rss_news_processing(sb, user_id: str, scrips: List[Dict], recipients: List[Dict]) -> int:
+    """
+    DEPRECATED: Use global optimization instead.
+    This function now bridges to the global system.
+    """
+    print(f"⚠️ DEPRECATED: lightweight_rss_news_processing called for user {user_id[:8]}")
+    print(f"⚠️ This should use the global optimization system instead")
     
-    finally:
-        # Force cleanup
-        import gc
-        gc.collect()
-    
-    return messages_sent
+    # Fallback to old system for single user (not optimal)
+    try:
+        from consolidated_rss_news import process_consolidated_rss_news
+        limited_scrips = scrips[:3]  # Process 3 companies max
+        return process_consolidated_rss_news(sb, user_id, limited_scrips, recipients)
+    except Exception as e:
+        print(f"❌ Fallback RSS processing error: {e}")
+        return 0
 
 
 @app.route('/cron/daily_summary')
