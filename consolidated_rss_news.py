@@ -971,8 +971,9 @@ def process_rss_globally_optimized(sb, all_users_data: Dict) -> int:
                 # Reset if it's been too long (1 hour) OR if company count changed significantly
                 if last_updated:
                     try:
-                        last_time = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
-                        time_diff = datetime.now().timestamp() - last_time.timestamp()
+                        from datetime import datetime as dt
+                        last_time = dt.fromisoformat(last_updated.replace('Z', '+00:00'))
+                        time_diff = dt.now().timestamp() - last_time.timestamp()
                         
                         # Reset conditions: timeout OR significant company count change
                         if time_diff > 3600:
@@ -981,9 +982,12 @@ def process_rss_globally_optimized(sb, all_users_data: Dict) -> int:
                         elif abs(stored_total - len(unique_companies)) > 2:
                             global_index = 0
                             print(f"🔄 Reset global rotation due to company count change ({stored_total} → {len(unique_companies)})")
+                        else:
+                            print(f"🔄 Continuing from stored index {global_index} (last run {time_diff/60:.1f} min ago)")
                     except Exception as parse_error:
                         print(f"Warning: Could not parse last_updated time: {parse_error}")
-                        global_index = 0
+                        # Don't reset on parse error - use stored index
+                        print(f"📊 Using stored index {global_index} despite parse error")
             else:
                 print("📊 No existing rotation record found - starting fresh")
                 
@@ -992,27 +996,33 @@ def process_rss_globally_optimized(sb, all_users_data: Dict) -> int:
             global_index = 0
             existing_record = None
         
-        # Step 3: Calculate next batch
+        # Step 3: Calculate next batch with FIXED logic
         start_index = global_index % len(unique_companies)
-        end_index = min(start_index + batch_size, len(unique_companies))
+        batch_companies = []
         
-        batch_companies = unique_companies[start_index:end_index]
+        # Get exactly batch_size companies, wrapping around if necessary
+        for i in range(batch_size):
+            company_index = (start_index + i) % len(unique_companies)
+            batch_companies.append(unique_companies[company_index])
         
-        # Wrap around if needed
-        if len(batch_companies) < batch_size and start_index > 0:
-            remaining = batch_size - len(batch_companies)
-            batch_companies.extend(unique_companies[:remaining])
-            next_index = remaining
-        else:
-            next_index = end_index % len(unique_companies)
+        # Calculate next starting index (where next run should start)
+        next_index = (start_index + batch_size) % len(unique_companies)
+        
+        print(f"🔧 BATCH CALCULATION DEBUG:")
+        print(f"   - global_index: {global_index}")
+        print(f"   - start_index: {start_index}")
+        print(f"   - batch_size: {batch_size}")
+        print(f"   - total_companies: {len(unique_companies)}")
+        print(f"   - calculated next_index: {next_index}")
+        print(f"   - batch_companies: {batch_companies}")
         
         print(f"🔄 GLOBAL ROTATION: Processing companies {start_index}-{start_index+len(batch_companies)-1} of {len(unique_companies)}")
         print(f"📊 COMPANIES IN BATCH: {', '.join(batch_companies)}")
         
         # Step 4: Update global rotation state with comprehensive data
         try:
-            from datetime import datetime
-            current_time = datetime.now().isoformat()
+            from datetime import datetime as dt_update
+            current_time = dt_update.now().isoformat()
             
             # Prepare update data
             update_data = {
@@ -1036,8 +1046,21 @@ def process_rss_globally_optimized(sb, all_users_data: Dict) -> int:
                 if update_result.data:
                     print(f"✅ SUCCESSFULLY UPDATED global rotation record ID {record_id}")
                     print(f"   New state: index={next_index}, total={len(unique_companies)}")
+                    
+                    # Verify the update worked by reading it back
+                    verify_result = sb.table('global_rss_rotation').select('last_company_index, total_companies').eq('id', record_id).execute()
+                    if verify_result.data:
+                        verified_index = verify_result.data[0].get('last_company_index')
+                        verified_total = verify_result.data[0].get('total_companies')
+                        print(f"🔍 VERIFICATION: DB now shows index={verified_index}, total={verified_total}")
+                        
+                        if verified_index != next_index:
+                            print(f"⚠️ WARNING: Update verification failed! Expected {next_index}, got {verified_index}")
+                    else:
+                        print(f"⚠️ Could not verify update")
                 else:
                     print(f"⚠️ Update returned no data - record ID {record_id}")
+                    print(f"⚠️ This might indicate the update failed - will try manual reset")
                     
             else:
                 # Insert new record (should only happen once)
