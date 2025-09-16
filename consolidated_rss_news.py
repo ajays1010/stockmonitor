@@ -510,7 +510,7 @@ def _has_multiple_companies_in_title(title: str, target_company: str) -> bool:
 # ========================================================================================
 
 def fetch_google_news_rss(company_name: str) -> List[Dict]:
-    """Fetch news from Google News RSS for a company"""
+    """Fetch news from Google News RSS for a company with deduplication"""
     try:
         search_queries = [
             f'"{company_name}" India stock news',
@@ -521,6 +521,7 @@ def fetch_google_news_rss(company_name: str) -> List[Dict]:
         ]
         
         all_articles = []
+        seen_articles = set()  # Track duplicates during fetch
         headers = {'User-Agent': 'Mozilla/5.0 (compatible; NewsBot/1.0)'}
         
         for search_query in search_queries:
@@ -547,6 +548,16 @@ def fetch_google_news_rss(company_name: str) -> List[Dict]:
                     if not is_relevant_news_simple(title, company_name):
                         continue
                     
+                    # Deduplicate at source based on title and URL
+                    title_clean = title.lower().strip()
+                    dedup_key = f"{title_clean}|{link}"
+                    
+                    if dedup_key in seen_articles:
+                        print(f"📰 🚫 SOURCE DUPLICATE: {title[:50]}...")
+                        continue
+                    
+                    seen_articles.add(dedup_key)
+                    
                     # Extract source from Google News title format
                     source = 'Google News'
                     if ' - ' in title:
@@ -568,6 +579,7 @@ def fetch_google_news_rss(company_name: str) -> List[Dict]:
                 print(f"  ❌ Query '{search_query}' failed: {e}")
                 continue
         
+        print(f"📰 {company_name}: Fetched {len(all_articles)} unique articles (after dedup)")
         return all_articles
         
     except Exception as e:
@@ -1154,6 +1166,9 @@ def process_company_for_user_optimized(sb, user_id: str, company_name: str, arti
             # Filter articles for this specific recipient
             new_articles = []
             
+            # Track articles already added to this message to prevent intra-message duplicates
+            seen_in_this_message = set()
+            
             for article in articles:
                 # Generate unique hash for this article + recipient combination
                 article_hash = generate_article_hash(article, company_name, recipient_id)
@@ -1166,6 +1181,20 @@ def process_company_for_user_optimized(sb, user_id: str, company_name: str, arti
                 if is_duplicate_in_database(sb, article, company_name, user_id):
                     mark_sent_in_memory(article_hash)
                     continue
+                
+                # CRITICAL: Check for duplicates within this message based on title and URL
+                article_title = article.get('title', '').strip().lower()
+                article_url = article.get('link', '').strip()
+                
+                # Create a simple dedup key for this message
+                dedup_key = f"{article_title}|{article_url}"
+                
+                if dedup_key in seen_in_this_message:
+                    print(f"📰 🚫 INTRA-MESSAGE DUPLICATE: {article_title[:50]}...")
+                    continue
+                
+                # Add to tracking for this message
+                seen_in_this_message.add(dedup_key)
                 
                 # Article is new and relevant
                 new_articles.append(article)
