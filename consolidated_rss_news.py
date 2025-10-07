@@ -9,7 +9,7 @@ Features:
 - Clean message formatting (your preferred template)
 - Comprehensive duplicate prevention
 - Memory efficient processing
-- Multiple news sources (RSS + API)
+- RSS-only via Google News RSS (no NewsData/NewsAPI calls)
 
 This replaces:
 - simple_rss_fix.py
@@ -23,10 +23,11 @@ import requests
 import feedparser
 import hashlib
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 from urllib.parse import quote_plus
 import logging
+from email.utils import parsedate_to_datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -51,6 +52,32 @@ QUALITY_SOURCES = [
     'hindu businessline', 'businessline',
     'zeebiz', 'zee business'
 ]
+
+# Source limiting and freshness controls
+ENABLE_SOURCE_WHITELIST = True  # Set to False to disable source filtering
+# Customize this whitelist via code or environment; defaults to QUALITY_SOURCES
+SOURCE_WHITELIST = QUALITY_SOURCES
+MAX_ARTICLE_AGE_HOURS = int(os.getenv('MAX_ARTICLE_AGE_HOURS', '12'))
+
+def is_allowed_source(source: str) -> bool:
+    if not ENABLE_SOURCE_WHITELIST:
+        return True
+    if not source:
+        return False
+    src = source.lower().strip()
+    return any(kw in src for kw in SOURCE_WHITELIST)
+
+def is_fresh_article(pub_date_str: str, max_hours: int = MAX_ARTICLE_AGE_HOURS) -> bool:
+    try:
+        if not pub_date_str:
+            return True  # If unknown, allow through to avoid missing timely items
+        dt = parsedate_to_datetime(pub_date_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        return (now - dt) <= timedelta(hours=max_hours)
+    except Exception:
+        return True
 
 # Comprehensive blacklist for noise filtering
 HEADLINE_BLACKLIST = [
@@ -535,7 +562,7 @@ def fetch_google_news_rss(company_name: str) -> List[Dict]:
                 
                 feed = feedparser.parse(response.content)
                 
-                # Process first 5 entries from each query
+                # Process first 5 entries from each query (filter by source whitelist and freshness)
                 for entry in feed.entries[:5]:
                     title = entry.get('title', '').strip()
                     link = entry.get('link', '').strip()
@@ -565,6 +592,14 @@ def fetch_google_news_rss(company_name: str) -> List[Dict]:
                         if len(parts) >= 2:
                             source = parts[-1].strip()
                             title = ' - '.join(parts[:-1]).strip()
+                    
+                    # Source whitelist filter
+                    if not is_allowed_source(source):
+                        continue
+                    
+                    # Freshness filter
+                    if not is_fresh_article(pub_date):
+                        continue
                     
                     all_articles.append({
                         'title': title[:150],  # Truncate to save memory
