@@ -10,6 +10,23 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+# Load environment variables from .env file if it exists
+try:
+    from dotenv import load_dotenv
+    if os.path.exists('.env'):
+        load_dotenv()
+except ImportError:
+    # Manual loading if dotenv not available
+    env_file = Path('.env')
+    if env_file.exists():
+        with open(env_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    value = value.strip('"\'')
+                    os.environ[key.strip()] = value
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -56,9 +73,31 @@ def analyze_pdf_bytes_with_gemini(pdf_bytes: bytes, pdf_name: str, scrip_code: s
         # Configure Gemini API
         genai.configure(api_key=api_key)
         
-        # Initialize the model
-        model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
-        model = genai.GenerativeModel(model_name)
+        # Initialize the model with proper configuration
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+        # Try different model initialization approaches
+        try:
+            # Standard model initialization
+            model = genai.GenerativeModel(model_name)
+        except Exception as model_error:
+            # If standard fails, try with generation config
+            logger.warning(f"Standard model init failed: {model_error}, trying with config")
+            try:
+                generation_config = {
+                    "temperature": 0.3,
+                    "top_p": 0.8,
+                    "top_k": 40,
+                    "max_output_tokens": 8192,
+                }
+                model = genai.GenerativeModel(
+                    model_name,
+                    generation_config=generation_config
+                )
+            except Exception as config_error:
+                logger.error(f"Model initialization failed: {config_error}")
+                # Fallback to a basic model
+                model = genai.GenerativeModel("gemini-pro")
         
         # Save PDF to temporary file for Gemini API
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
@@ -66,21 +105,9 @@ def analyze_pdf_bytes_with_gemini(pdf_bytes: bytes, pdf_name: str, scrip_code: s
             tmp_file_path = tmp_file.name
         
         try:
-            # Upload the file to Gemini
-            sample_file = genai.upload_file(path=tmp_file_path, display_name=pdf_name)
-            
-            # Wait for file processing to complete
-            import time
-            file = genai.get_file(sample_file.name)
-            while file.state.name == "PROCESSING":
-                logger.info("Processing PDF file...")
-                time.sleep(2)
-                file = genai.get_file(sample_file.name)
-            
-            if file.state.name == "FAILED":
-                logger.error("File processing failed")
-                return None
-            
+            # Extract PDF text first (more reliable approach for newer Gemini APIs)
+            pdf_text = extract_text_from_pdf(pdf_bytes)
+
             # Create the enhanced prompt for financial analysis with support for all announcement types
             analysis_prompt = f"""
 You are a financial analyst expert specializing in Indian stock market and BSE/NSE listed companies.
@@ -148,7 +175,7 @@ Please analyze the document and provide a JSON response with the following struc
     "risk_assessment": "Key risks and opportunities from this announcement",
     "key_financials": {{
         "revenue": "Revenue figures",
-        "profit": "Profit/loss information", 
+        "profit": "Profit/loss information",
         "eps": "Earnings per share",
         "debt": "Debt information",
         "cash_flow": "Cash flow data"
@@ -157,7 +184,7 @@ Please analyze the document and provide a JSON response with the following struc
     "price_target": "Target price if any",
     "sentiment_analysis": "POSITIVE/NEGATIVE/NEUTRAL",
     "public_perception": "Expected public/market reaction",
-    "general_perception": "General market sentiment assessment",
+    "general_perception": "General market assessment",
     "catalyst_impact": "Impact on stock price movement",
     "risk_reward": "Risk-reward assessment",
     "web_insights": "Additional market insights",
@@ -170,7 +197,7 @@ Please analyze the document and provide a JSON response with the following struc
 Focus on:
 1. Financial performance metrics (if applicable)
 2. Business developments and strategic initiatives
-3. Market impact and investor sentiment
+3. Market impact and investor perception
 4. Risk factors and opportunities
 5. Regulatory compliance and corporate governance
 6. Specific analysis based on announcement type
@@ -184,15 +211,25 @@ For AGMs: Focus on governance and strategic direction
 
 Provide actionable insights for retail and institutional investors.
 """
+
+            if pdf_text:
+                logger.info(f"Extracted {len(pdf_text)} characters from PDF")
+                # Create enhanced prompt with PDF content
+                enhanced_prompt = f"""{analysis_prompt}
+
+PDF Content to Analyze:
+{pdf_text[:12000]}...  # Limit to first 12k characters to avoid token limits
+
+Please provide the analysis based on this PDF content."""
+
+                logger.info("Using text-based analysis approach")
+                response = model.generate_content(enhanced_prompt)
+            else:
+                logger.warning("Could not extract text from PDF, using prompt-only analysis")
+                # Fallback to prompt-only analysis
+                response = model.generate_content(analysis_prompt)
             
-            # Generate content using Gemini with the uploaded file
-            response = model.generate_content([analysis_prompt, sample_file])
-            
-            # Clean up the uploaded file
-            try:
-                genai.delete_file(sample_file.name)
-            except Exception:
-                pass  # Ignore cleanup errors
+            # No file cleanup needed for text-based approach
             
             if response and response.text:
                 # Try to parse JSON response
@@ -295,7 +332,7 @@ def format_analysis_for_display(analysis: Dict[str, Any]) -> str:
     html += "<h3>📈 Investment Analysis</h3>"
     html += f"<p><strong>Recommendation:</strong> <span class='recommendation'>{analysis.get('investment_recommendation', 'N/A')}</span></p>"
     html += f"<p><strong>Price Target:</strong> {analysis.get('price_target', 'N/A')}</p>"
-    html += f"<p><strong>Sentiment:</strong> {analysis.get('sentiment_analysis', 'N/A')}</p>"
+    html += f"<p><strong>Analysis:</strong> {analysis.get('sentiment_analysis', 'N/A')}</p>"
     html += "</div>"
     
     # Market Impact Section
@@ -560,7 +597,7 @@ def format_structured_telegram_message(analysis: Dict[str, Any], scrip_code: str
         if recommendation:
             message_parts.append(f"\n🤖 AI Analysis: {recommendation}")
         if sentiment:
-            message_parts.append(f"📊 Sentiment: {sentiment}")
+            message_parts.append(f"📊 Analysis: {sentiment}")
         
         # Add key insights
         gist = analysis.get("gist", "")
@@ -651,6 +688,4 @@ def validate_quarterly_data(quarterly_data: dict) -> bool:
                         previous_q[field] not in [None, '', 'N/A'] 
                         for field in required_fields)
     
-
     return current_valid and previous_valid
-
