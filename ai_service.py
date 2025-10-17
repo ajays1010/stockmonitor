@@ -57,7 +57,7 @@ def analyze_pdf_bytes_with_gemini(pdf_bytes: bytes, pdf_name: str, scrip_code: s
         genai.configure(api_key=api_key)
         
         # Initialize the model
-        model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
         model = genai.GenerativeModel(model_name)
         
         # Save PDF to temporary file for Gemini API
@@ -651,4 +651,5 @@ def validate_quarterly_data(quarterly_data: dict) -> bool:
                         previous_q[field] not in [None, '', 'N/A'] 
                         for field in required_fields)
     
+
     return current_valid and previous_valid
