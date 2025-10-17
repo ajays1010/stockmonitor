@@ -41,6 +41,8 @@ services:
       # AI Configuration
       - key: GEMINI_API_KEY
         sync: false
+      - key: GEMINI_MODEL
+        value: "gemini-2.5-flash"
       # NewsData.io Configuration (for sentiment analysis)
       - key: NEWSDATA_API_KEY
         sync: false
@@ -85,6 +87,7 @@ services:
     envVars:
       - key: CRON_SECRET_KEY
         sync: false
+
 
 
 
