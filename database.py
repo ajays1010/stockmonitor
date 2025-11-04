@@ -1405,24 +1405,31 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
                     print(f"BSE DUPLICATE PREVENTION: Skipping {news_id} - already processed in this run")
                 continue
 
-            # ENHANCED: Check with memory-based deduplication tracker first
+            # ENHANCED: Check with memory-based deduplication tracker first (PRIMARY CHECK)
             is_dup, dup_reason = is_bse_duplicate(user_id, news_id, headline, company_name, ann_dt)
             if is_dup:
                 if os.environ.get('BSE_VERBOSE', '0') == '1':
                     print(f"🚫 BSE ENHANCED DUPLICATE: {news_id} - {dup_reason}")
                 continue
 
-            # Skip if already seen in database (fallback)
-            if not db_seen_announcement_exists(user_client, user_id, news_id):
-                all_new.append(item)
-                processed_in_this_run.add(news_id)
-                # Mark as sent in the enhanced tracker
-                mark_bse_sent(user_id, news_id, headline, company_name, ann_dt)
+            # Only proceed if not a duplicate according to enhanced tracker
+            all_new.append(item)
+            processed_in_this_run.add(news_id)
+
+            # Mark as sent in the enhanced tracker IMMEDIATELY
+            mark_bse_sent(user_id, news_id, headline, company_name, ann_dt)
+
+            # Also mark in database as backup (but don't rely on this for duplicate prevention)
+            try:
+                db_save_seen_announcement(user_client, user_id, news_id, scrip_code, headline,
+                                        item.get('pdf_name', ''), ann_dt, '', category)
+            except Exception as e:
+                # Don't fail if database save fails - enhanced tracker is primary
                 if os.environ.get('BSE_VERBOSE', '0') == '1':
-                    print(f"BSE PROCESSING: Added new announcement {news_id} for processing")
-            else:
-                if os.environ.get('BSE_VERBOSE', '0') == '1':
-                    print(f"BSE DUPLICATE PREVENTION: Skipping {news_id} - already exists in database")
+                    print(f"BSE WARNING: Database save failed for {news_id}: {e}")
+
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"BSE PROCESSING: Added new announcement {news_id} for processing")
 
     recipients_count = len(telegram_recipients)
     ann_count = len(all_new)

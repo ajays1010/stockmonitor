@@ -41,7 +41,7 @@ class BSEAnnouncementTracker:
         self._verbose = os.environ.get('BSE_VERBOSE', '0') == '1'
 
         if self._verbose:
-            print("🔍 BSE Dedup Tracker: Initialized with enhanced time windows")
+            print("BSE Dedup Tracker: Initialized with enhanced time windows")
 
     def _generate_content_hash(self, headline: str, company_name: str, ann_dt: str) -> str:
         """Generate a content-based hash for announcements to catch near-duplicates"""
@@ -81,7 +81,7 @@ class BSEAnnouncementTracker:
 
         if self._verbose and initial_count > 0:
             cleaned = initial_count - len(self._recent_announcements)
-            print(f"🧹 BSE Dedup Tracker: Cleaned {cleaned} old entries")
+            print(f"BSE Dedup Tracker: Cleaned {cleaned} old entries")
 
     def is_duplicate_announcement(self, user_id: str, news_id: str, headline: str,
                                 company_name: str, ann_dt: str) -> Tuple[bool, str]:
@@ -101,7 +101,7 @@ class BSEAnnouncementTracker:
             time_diff = current_time - self._recent_announcements[news_id]
             if time_diff < self._rapid_refetch_window:
                 if self._verbose:
-                    print(f"🚫 BSE DUPLICATE: Rapid refetch prevented for {news_id} ({time_diff:.1f}s ago)")
+                    print(f"BSE DUPLICATE: Rapid refetch prevented for {news_id} ({time_diff:.1f}s ago)")
                 return True, f"rapid_refetch_{time_diff:.0f}s"
 
         # 2. Check global duplicate window (prevent same announcement to anyone)
@@ -109,7 +109,7 @@ class BSEAnnouncementTracker:
             time_diff = current_time - self._recent_announcements[news_id]
             if time_diff < self._global_duplicate_window:
                 if self._verbose:
-                    print(f"🌍 BSE DUPLICATE: Global duplicate prevented for {news_id} ({time_diff:.1f}s ago)")
+                    print(f"BSE DUPLICATE: Global duplicate prevented for {news_id} ({time_diff:.1f}s ago)")
                 return True, f"global_duplicate_{time_diff:.0f}s"
 
         # 3. Check user-specific duplicates
@@ -124,7 +124,7 @@ class BSEAnnouncementTracker:
             time_diff = current_time - self._announcement_hashes[content_hash]
             if time_diff < self._hash_duplicate_window:
                 if self._verbose:
-                    print(f"📝 BSE DUPLICATE: Content hash duplicate prevented for {content_hash}")
+                    print(f"BSE DUPLICATE: Content hash duplicate prevented for {content_hash}")
                 return True, f"content_hash_duplicate_{time_diff:.0f}s"
 
         # Not a duplicate
@@ -146,7 +146,7 @@ class BSEAnnouncementTracker:
         self._announcement_hashes[content_hash] = current_time
 
         if self._verbose:
-            print(f"✅ BSE TRACKED: Marked {news_id} sent to {user_id[:8]} (hash: {content_hash})")
+            print(f"BSE TRACKED: Marked {news_id} sent to {user_id[:8]} (hash: {content_hash})")
 
     def get_tracking_stats(self) -> Dict:
         """Get current tracking statistics"""

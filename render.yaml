@@ -53,6 +53,9 @@ services:
         value: "0"
       - key: BSE_VERBOSE
         value: "1"
+      # Enhanced deduplication settings
+      - key: ALERT_VERBOSE
+        value: "1"
     # Cron Jobs
   
   # 1. Price Spike Monitoring (Every 5 minutes during market hours)
@@ -66,11 +69,11 @@ services:
       - key: CRON_SECRET_KEY
         sync: false
 
-  # 2. End-of-Day Price Summary (Daily at 4:30 PM IST)
+  # 2. End-of-Day Price Summary (Daily at 4:00 PM IST)
   - type: cron
     name: daily-price-summary
     env: python
-    schedule: "30 11 * * 1-5"  # 4:30 PM IST = 11:00 AM UTC (Monday to Friday)
+    schedule: "0 10 * * 1-5"  # 4:00 PM IST = 10:30 AM UTC (Monday to Friday)
     buildCommand: pip install -r requirements.txt
     startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/daily_summary?key=$CRON_SECRET_KEY" || exit 1
     envVars:
@@ -84,6 +87,17 @@ services:
     schedule: "*/5 * * * *"  # Every 5 minutes, 24 hours a day, 7 days a week
     buildCommand: pip install -r requirements.txt
     startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/bse_announcements?key=$CRON_SECRET_KEY" || exit 1
+    envVars:
+      - key: CRON_SECRET_KEY
+        sync: false
+
+  # 4. Daily Bulk Deals Monitoring (Once daily at 9:00 AM IST)
+  - type: cron
+    name: daily-bulk-deals
+    env: python
+    schedule: "30 3 * * 1-5"  # 9:00 AM IST = 3:30 AM UTC (Monday to Friday)
+    buildCommand: pip install -r requirements.txt
+    startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/bulk_deals?key=$CRON_SECRET_KEY" || exit 1
     envVars:
       - key: CRON_SECRET_KEY
         sync: false
