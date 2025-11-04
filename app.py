@@ -13,6 +13,8 @@ from admin import admin_bp
 import uuid
 from sentiment_analyzer import get_sentiment_analysis_for_stock, create_sentiment_visualizations
 from logging_config import github_logger
+from bse_dedup_tracker import is_bse_duplicate, mark_bse_sent, get_bse_tracking_stats, add_bse_dedup_endpoints
+from multi_threshold_alerts import get_alert_tracking_stats, add_alert_endpoints
 import logging
 import traceback
 
@@ -170,6 +172,12 @@ class DatabaseConnectionPool:
 # Initialize connection pool
 _db_pool = DatabaseConnectionPool()
 
+# Add BSE deduplication endpoints
+add_bse_dedup_endpoints(app)
+
+# Add multi-threshold alert endpoints
+add_alert_endpoints(app)
+
 # Fast memory usage function
 @lru_cache(maxsize=1)
 def _get_memory_usage_fast():
@@ -180,19 +188,24 @@ def _get_memory_usage_fast():
     except:
         return 0
 
-# Clear cache every 10 seconds - DISABLED TO PREVENT SIGKILL
+# Clear cache every 10 seconds - RE-ENABLED with proper error handling
 def _clear_memory_cache():
     try:
         _get_memory_usage_fast.cache_clear()
-        # DISABLED: threading.Timer was causing SIGKILL issues
-        # if not app.debug:
-        #     threading.Timer(10.0, _clear_memory_cache).start()
+        # Re-enabled with safer threading approach
+        if not app.debug and not os.environ.get('DISABLE_AUTO_CLEANUP'):
+            timer = threading.Timer(10.0, _clear_memory_cache)
+            timer.daemon = True  # Set as daemon thread to prevent blocking shutdown
+            timer.start()
     except Exception as e:
         print(f"Memory cache clear error: {e}")
 
-# DISABLED: Start the cache clearing timer only in production
-# if not os.environ.get('FLASK_DEBUG') == '1':
-#     _clear_memory_cache()
+# Start the cache clearing timer only in production
+if not os.environ.get('FLASK_DEBUG') == '1' and not os.environ.get('DISABLE_AUTO_CLEANUP'):
+    try:
+        _clear_memory_cache()
+    except Exception as e:
+        print(f"Failed to start cache clearing timer: {e}")
 
 # RSS Memory Management Context Manager
 @contextmanager
@@ -1675,12 +1688,12 @@ def lightweight_rss_news_processing(sb, user_id: str, scrips: List[Dict], recipi
 @app.route('/cron/daily_summary')
 @log_errors
 def cron_daily_summary():
-    """Cron-compatible endpoint to send BSE announcements.
+    """Cron-compatible endpoint to send end-of-day price movement summary.
     Expects a secret key in query string (?key=...) to prevent abuse.
-    Optionally accepts hours_back (default 1).
+    Runs at 16:30 IST to send daily price movement notifications.
 
     This endpoint iterates over all users who have both monitored scrips and
-    at least one Telegram recipient, and sends consolidated announcements.
+    at least one Telegram recipient, and sends consolidated price movement summaries.
     """
     key = request.args.get('key')
     expected = os.environ.get('CRON_SECRET_KEY')
@@ -1726,7 +1739,7 @@ def cron_daily_summary():
 
         import uuid
         run_id = str(uuid.uuid4())
-        job_name = 'hourly_spike_alerts' if request.path.endswith('/hourly_spike_alerts') else 'bse_announcements'
+        job_name = 'daily_summary'
 
         for uid, scrips in scrips_by_user.items():
             recipients = recs_by_user.get(uid) or []
@@ -1747,23 +1760,10 @@ def cron_daily_summary():
                     logging.error(f"Failed to log skipped cron run: {e}")
                 continue
             try:
-                # Decide which job to run based on path
-                if request.path.endswith('/hourly_spike_alerts'):
-                    sent = db.send_hourly_spike_alerts(sb, uid, scrips, recipients)
-                elif request.path.endswith('/evening_summary'):
-                    # Enforce evening run by default; allow override with force=true
-                    force = request.args.get('force') == 'true'
-                    is_open, open_dt, close_dt = db.ist_market_window()
-                    from datetime import datetime
-                    now = db.ist_now()
-                    if (now <= close_dt) and not force:
-                        # Skip if before or during market hours unless forced
-                        sent = 0
-                    else:
-                        # Send price summary instead of announcements
-                        sent = db.send_script_messages_to_telegram(sb, uid, scrips, recipients)
-                else:
-                    sent = db.send_bse_announcements_consolidated(sb, uid, scrips, recipients, hours_back=hours_back)
+                # Send end-of-day price movement summary
+                print(f"📊 Sending daily price summary for user {uid[:8]}...")
+                sent = db.send_script_messages_to_telegram(sb, uid, scrips, recipients)
+                print(f"✅ Daily summary sent: {sent} messages for user {uid[:8]}")
                 totals["users_processed"] += 1
                 totals["notifications_sent"] += sent
                 totals["recipients"] += len(recipients)
@@ -1832,6 +1832,30 @@ def health_check():
     
     response_time = round((time.time() - start_time) * 1000, 1)  # milliseconds
     
+    # Add BSE deduplication stats
+    try:
+        bse_stats = get_bse_tracking_stats()
+        bse_dedup_info = {
+            'active_announcements': bse_stats.get('active_global_announcements', 0),
+            'content_hashes': bse_stats.get('active_content_hashes', 0),
+            'users_tracking': bse_stats.get('total_users_tracking', 0),
+            'memory_entries': bse_stats.get('total_memory_entries', 0)
+        }
+    except Exception:
+        bse_dedup_info = {'status': 'tracker_error'}
+
+    # Add multi-threshold alert stats
+    try:
+        alert_stats = get_alert_tracking_stats()
+        alert_info = {
+            'active_alerts_today': alert_stats.get('active_alerts_today', 0),
+            'threshold_counts': alert_stats.get('threshold_counts', {}),
+            'users_tracking': alert_stats.get('total_tracking_keys', 0),
+            'thresholds_configured': alert_stats.get('thresholds_configured', [])
+        }
+    except Exception:
+        alert_info = {'status': 'alert_tracker_error'}
+
     return {
         'status': 'ok',
         'timestamp': datetime.utcnow().isoformat() + 'Z',
@@ -1840,7 +1864,9 @@ def health_check():
         'response_ms': response_time,
         'memory_mb': _get_memory_usage_fast(),
         'db_pool_size': len(_db_pool.connections),
-        'rss_objects': len(_rss_memory_tracker)
+        'rss_objects': len(_rss_memory_tracker),
+        'bse_deduplication': bse_dedup_info,
+        'multi_threshold_alerts': alert_info
     }, 200
 
 @app.route('/debug/cron_auth')
@@ -2855,38 +2881,51 @@ def memory_optimize():
         'timestamp': datetime.now().isoformat()
     }
 
-# Periodic Cleanup Function - DISABLED TO PREVENT SIGKILL
+# Periodic Cleanup Function - RE-ENABLED with safety measures
 def periodic_cleanup():
-    """Run periodic cleanup every 30 minutes - DISABLED"""
+    """Run periodic cleanup every 30 minutes with proper error handling"""
     try:
+        print("🧹 Starting periodic cleanup...")
+
         # Cleanup old database connections
         _db_pool.cleanup_old_connections()
-        
+
         # Force garbage collection if memory high
         current_memory = _get_memory_usage_fast()
         if current_memory > 400:  # If over 400MB
             gc.collect()
-            print(f"🧹 Periodic cleanup: {current_memory}MB → {_get_memory_usage_fast()}MB")
-        
+            new_memory = _get_memory_usage_fast()
+            print(f"🧹 Periodic cleanup: {current_memory}MB → {new_memory}MB")
+
         # Clear RSS cache (less frequently)
         try:
             import random
             if random.randint(1, 20) == 1:  # Only 5% of the time during periodic cleanup
                 from simple_rss_fix import cleanup_rss_cache
                 cleanup_rss_cache()
-        except:
-            pass
-            
-    except Exception as e:
-        print(f"Cleanup error: {e}")
-    
-    # DISABLED: threading.Timer was causing SIGKILL issues
-    # if not app.debug:
-    #     threading.Timer(1800.0, periodic_cleanup).start()  # 30 minutes
+                print("🧹 RSS cache cleaned")
+        except Exception as e:
+            print(f"RSS cache cleanup error: {e}")
 
-# DISABLED: Start periodic cleanup only in production
-# if not os.environ.get('FLASK_DEBUG') == '1':
-#     periodic_cleanup()
+        print("✅ Periodic cleanup completed")
+    except Exception as e:
+        print(f"Periodic cleanup error: {e}")
+
+    # Re-enabled with safer threading
+    if not app.debug and not os.environ.get('DISABLE_AUTO_CLEANUP'):
+        try:
+            timer = threading.Timer(1800.0, periodic_cleanup)  # 30 minutes
+            timer.daemon = True  # Set as daemon thread
+            timer.start()
+        except Exception as e:
+            print(f"Failed to schedule periodic cleanup: {e}")
+
+# Start periodic cleanup only in production
+if not os.environ.get('FLASK_DEBUG') == '1' and not os.environ.get('DISABLE_AUTO_CLEANUP'):
+    try:
+        periodic_cleanup()
+    except Exception as e:
+        print(f"Failed to start periodic cleanup: {e}")
 
 # --- Main Execution ---
 if __name__ == '__main__':

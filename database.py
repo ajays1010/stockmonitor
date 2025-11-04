@@ -888,15 +888,27 @@ def _record_alert_today(user_client, user_id: str, bse_code: str, alert_type: st
         pass
 
 def send_hourly_spike_alerts(user_client, user_id: str, monitored_scrips, telegram_recipients, price_threshold_pct: float = 5.0, volume_threshold_pct: float = 400.0) -> int:
-    """Scan each monitored scrip hourly and send at most one alert per day during market hours when:
-    - abs(price change) >= threshold vs previous close, OR
-    - today's volume >= volume_threshold_pct of previous day's volume.
+    """Enhanced multi-threshold price spike alerts.
+
+    Sends notifications at progressive thresholds: 5%, 10%, 15%, 20%
+    Each threshold triggers once per direction per day.
+    Volume spike alerts work as before (once per day).
+
     Returns number of messages sent.
     Requires a table 'daily_alerts_sent' with schema in ALERTS_SQL_SCHEMA.
     """
+    # Import the multi-threshold tracker
+    try:
+        from multi_threshold_alerts import should_send_price_alert, mark_price_alert_sent
+    except ImportError:
+        # Fallback to original behavior if tracker not available
+        def should_send_price_alert(*args, **kwargs): return (False, None, "tracker_unavailable")
+        def mark_price_alert_sent(*args, **kwargs): pass
+
     messages_sent = 0
     if not monitored_scrips or not telegram_recipients:
         return 0
+
     # Only send during market hours
     is_open, _, _ = ist_market_window()
     if not is_open:
@@ -919,43 +931,89 @@ def send_hourly_spike_alerts(user_client, user_id: str, monitored_scrips, telegr
 
         price_change_pct, volume_spike_pct, price, prev_close, today_vol, prev_vol = _get_price_change_and_volume(sym)
 
-        trigger = None
+        # Handle price alerts with multi-threshold system
+        price_alert_sent = False
         if price_change_pct is not None and abs(price_change_pct) >= price_threshold_pct:
-            trigger = 'price_up' if price_change_pct > 0 else 'price_down'
+            # Check if this threshold should trigger
+            should_send, threshold_crossed, alert_type = should_send_price_alert(
+                user_client, user_id, bse_code, price_change_pct
+            )
+
+            if should_send and threshold_crossed is not None:
+                # Build enhanced price alert message
+                def fmt(v):
+                    try:
+                        return f"{float(v):.2f}"
+                    except Exception:
+                        return "N/A"
+
+                direction = "🔼" if price_change_pct > 0 else "🔻"
+                sign = "+" if price_change_pct >= 0 else ""
+                threshold_emoji = "🚨" if threshold_crossed >= 20 else "⚠️" if threshold_crossed >= 15 else "📈" if threshold_crossed >= 10 else "📊"
+
+                parts = [
+                    f"{threshold_emoji} Price Alert: {company_name} ({bse_code})",
+                    f"Price: ₹{fmt(price)} ({direction} {sign}{fmt(price_change_pct)}%) vs prev close ₹{fmt(prev_close)}",
+                    f"Threshold Crossed: {threshold_crossed}%"
+                ]
+
+                text = "\n".join(parts)
+
+                # Send to all recipients
+                for rec in telegram_recipients:
+                    try:
+                        user_name = rec.get('user_name', 'User')
+                        send_telegram_message_with_user_name(rec['chat_id'], text, user_name)
+                        messages_sent += 1
+                    except Exception:
+                        pass
+
+                # Mark this threshold as sent
+                mark_price_alert_sent(user_client, user_id, bse_code, price_change_pct, threshold_crossed)
+                price_alert_sent = True
+
+        # Handle volume spike alerts (original logic)
+        volume_alert_sent = False
         if volume_spike_pct is not None and volume_spike_pct >= volume_threshold_pct:
-            trigger = trigger or 'volume_spike'
+            trigger = 'volume_spike'
 
-        if not trigger:
-            continue
+            # Check if volume alert already sent today (original logic)
+            if not _has_sent_alert_today(user_client, user_id, bse_code, trigger):
+                # Build volume alert message
+                def fmt(v):
+                    try:
+                        return f"{float(v):.2f}"
+                    except Exception:
+                        return "N/A"
 
-        if _has_sent_alert_today(user_client, user_id, bse_code, trigger):
-            continue
+                # Include price info if available
+                price_info = ""
+                if price_change_pct is not None:
+                    arrow = '🔼' if price_change_pct > 0 else ('🔻' if price_change_pct < 0 else '➖')
+                    sign = '+' if price_change_pct >= 0 else ''
+                    price_info = f"Price: ₹{fmt(price)} ({arrow} {sign}{fmt(price_change_pct)}%) vs prev close ₹{fmt(prev_close)}\n"
 
-        # Build message
-        def fmt(v):
-            try:
-                return f"{float(v):.2f}"
-            except Exception:
-                return "N/A"
-        arrow = '🔼' if (price_change_pct or 0) > 0 else ('🔻' if (price_change_pct or 0) < 0 else '➖')
-        sign = '+' if (price_change_pct or 0) >= 0 else ''
-        parts = [
-            f"⚠️ Alert: {company_name} ({bse_code})",
-            f"Price: ₹{fmt(price)} ({arrow} {sign}{fmt(price_change_pct)}%) vs prev close ₹{fmt(prev_close)}",
-        ]
-        if volume_spike_pct is not None:
-            parts.append(f"Volume spike: {fmt(volume_spike_pct)}% vs yesterday (today {fmt(today_vol)}, prev {fmt(prev_vol)})")
-        text = "\n".join(parts)
+                parts = [
+                    f"📊 Volume Alert: {company_name} ({bse_code})",
+                    price_info,
+                    f"Volume spike: {fmt(volume_spike_pct)}% vs yesterday (today {fmt(today_vol)}, prev {fmt(prev_vol)})"
+                ]
 
-        for rec in telegram_recipients:
-            try:
-                user_name = rec.get('user_name', 'User')
-                send_telegram_message_with_user_name(rec['chat_id'], text, user_name)
-                messages_sent += 1
-            except Exception:
-                pass
+                # Remove empty lines
+                parts = [p for p in parts if p.strip()]
+                text = "\n".join(parts)
 
-        _record_alert_today(user_client, user_id, bse_code, trigger)
+                # Send to all recipients
+                for rec in telegram_recipients:
+                    try:
+                        user_name = rec.get('user_name', 'User')
+                        send_telegram_message_with_user_name(rec['chat_id'], text, user_name)
+                        messages_sent += 1
+                    except Exception:
+                        pass
+
+                _record_alert_today(user_client, user_id, bse_code, trigger)
+                volume_alert_sent = True
 
     return messages_sent
 
@@ -1302,6 +1360,14 @@ def fetch_bse_announcements_for_scrip(scrip_code: str, since_dt, allowed_categor
     return results
 
 def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scrips, telegram_recipients, hours_back: int = 24) -> int:
+    # Import the enhanced deduplication tracker
+    try:
+        from bse_dedup_tracker import is_bse_duplicate, mark_bse_sent
+    except ImportError:
+        # Fallback if tracker not available
+        def is_bse_duplicate(*args, **kwargs): return (False, "tracker_unavailable")
+        def mark_bse_sent(*args, **kwargs): pass
+
     # Build a lookup from bse_code to company_name for friendly messages
     code_to_name = {}
     try:
@@ -1329,17 +1395,29 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
         ann = fetch_bse_announcements_for_scrip(scrip_code, since_dt, allowed_categories=allowed)
         for item in ann:
             news_id = item['news_id']
-            
+            headline = item.get('headline', '')
+            company_name = code_to_name.get(str(scrip_code), str(scrip_code))
+            ann_dt = item.get('ann_dt', '')
+
             # Skip if already processed in this run
             if news_id in processed_in_this_run:
                 if os.environ.get('BSE_VERBOSE', '0') == '1':
                     print(f"BSE DUPLICATE PREVENTION: Skipping {news_id} - already processed in this run")
                 continue
-                
-            # Skip if already seen in database
+
+            # ENHANCED: Check with memory-based deduplication tracker first
+            is_dup, dup_reason = is_bse_duplicate(user_id, news_id, headline, company_name, ann_dt)
+            if is_dup:
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"🚫 BSE ENHANCED DUPLICATE: {news_id} - {dup_reason}")
+                continue
+
+            # Skip if already seen in database (fallback)
             if not db_seen_announcement_exists(user_client, user_id, news_id):
                 all_new.append(item)
                 processed_in_this_run.add(news_id)
+                # Mark as sent in the enhanced tracker
+                mark_bse_sent(user_id, news_id, headline, company_name, ann_dt)
                 if os.environ.get('BSE_VERBOSE', '0') == '1':
                     print(f"BSE PROCESSING: Added new announcement {news_id} for processing")
             else:

@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -w 2 -k sync -t 60 --timeout 60 --max-requests 200 --max-requests-jitter 20 --worker-tmp-dir /dev/shm --preload -b 0.0.0.0:$PORT app:app
+    startCommand: bash start_with_monitor.sh
     healthCheckPath: /health
     autoDeploy: true
     envVars:
@@ -66,13 +66,13 @@ services:
       - key: CRON_SECRET_KEY
         sync: false
 
-  # 2. Evening Summary (Once daily at 7:35 PM IST - TESTING)
+  # 2. End-of-Day Price Summary (Daily at 4:30 PM IST)
   - type: cron
-    name: evening-summary
+    name: daily-price-summary
     env: python
-    schedule: "0 3 * * 1-5"  # 8:30 AM IST = 3:00 AM UTC (Monday to Friday)
+    schedule: "30 11 * * 1-5"  # 4:30 PM IST = 11:00 AM UTC (Monday to Friday)
     buildCommand: pip install -r requirements.txt
-    startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/evening_summary?key=$CRON_SECRET_KEY&force=true" || exit 1
+    startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/daily_summary?key=$CRON_SECRET_KEY" || exit 1
     envVars:
       - key: CRON_SECRET_KEY
         sync: false
