@@ -1421,6 +1421,7 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
 
             # Also mark in database as backup (but don't rely on this for duplicate prevention)
             try:
+                category = item.get('category', '')
                 db_save_seen_announcement(user_client, user_id, news_id, scrip_code, headline,
                                         item.get('pdf_name', ''), ann_dt, '', category)
             except Exception as e:
