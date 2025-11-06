@@ -284,53 +284,116 @@ class BulkBlockDealsMonitor:
         """Create unique ID for a deal to prevent duplicates"""
         return f"{deal['source']}_{deal.get('script_code', deal['security_name'])}_{deal['client_name']}_{deal['quantity']}_{deal['deal_date']}"
 
-def send_bulk_deals_alerts(user_client, user_id: str, monitored_scrips: List[Dict], 
+def send_bulk_deals_alerts(user_client, user_id: str, monitored_scrips: List[Dict],
                           telegram_recipients: List[Dict]) -> int:
     """
-    Send bulk/block deals alerts for monitored stocks
-    Integrates with existing BSE monitoring system
-    
+    Enhanced bulk/block deals alerts for monitored stocks.
+    Checks previous trading day's bulk deals and sends notifications.
+    Integrates with existing BSE monitoring system.
+
     Returns: Number of messages sent
     """
     messages_sent = 0
-    
+
     try:
-        monitor = BulkBlockDealsMonitor()
-        
-        # Fetch all deals
-        all_deals = monitor.fetch_all_deals()
-        
-        if not all_deals:
+        # Try to use the enhanced bulk deal fetcher first
+        try:
+            from bulk_deal_fetcher import BulkDealFetcher, format_bulk_deal_message
+
+            fetcher = BulkDealFetcher()
+
+            # Get previous trading day (bulk deals are available for previous day)
+            previous_trading_day = fetcher.get_previous_trading_day()
+
             if os.environ.get('BSE_VERBOSE', '0') == '1':
-                print(f"Bulk Deals: No deals found for any stocks")
-            return 0
-        
-        # Filter by user's monitored stocks
-        filtered_deals = monitor.filter_deals_by_monitored_stocks(all_deals, monitored_scrips)
-        
-        if not filtered_deals:
-            if os.environ.get('BSE_VERBOSE', '0') == '1':
-                print(f"Bulk Deals: No deals found for user's monitored stocks")
-            return 0
-        
-        # Check for new deals (not seen before)
-        new_deals = []
-        for deal in filtered_deals:
-            deal_id = monitor.create_deal_id(deal)
-            
-            # Check if deal already seen
-            if not db_seen_deal_exists(user_client, user_id, deal_id):
-                new_deals.append(deal)
-                # Mark as seen
-                db_save_seen_deal(user_client, user_id, deal_id, deal)
-        
-        if not new_deals:
-            if os.environ.get('BSE_VERBOSE', '0') == '1':
-                print(f"Bulk Deals: No new deals (all already processed)")
-            return 0
-        
-        # Format message
-        message_text = monitor.format_deals_for_telegram(new_deals)
+                print(f"Bulk Deals: Checking deals for {previous_trading_day} (previous trading day)")
+
+            # Fetch all bulk deals for previous trading day
+            all_bulk_deals = fetcher.fetch_all_bulk_deals(previous_trading_day)
+
+            if not all_bulk_deals:
+                print(f"Bulk Deals: No deals found for {previous_trading_day}")
+                return 0
+
+            # Filter deals for monitored stocks only
+            monitored_deals = fetcher.filter_monitored_stocks(all_bulk_deals, monitored_scrips)
+
+            if not monitored_deals:
+                print(f"Bulk Deals: No deals found for monitored stocks on {previous_trading_day}")
+                return 0
+
+            # Check if we already sent bulk deal alerts for this date
+            if _has_sent_bulk_alerts_today(user_client, user_id, previous_trading_day):
+                print(f"Bulk Deals: Alerts already sent for {previous_trading_day}")
+                return 0
+
+            # Format message
+            message = format_bulk_deal_message(monitored_deals)
+
+            if not message:
+                print("Bulk Deals: Failed to format message")
+                return 0
+
+            # Add header with trading date
+            from datetime import datetime
+            header = f"📈 Bulk Deals Alert - {previous_trading_day.strftime('%d %b %Y')}\n"
+            full_message = header + message
+
+            # Send to all recipients
+            for recipient in telegram_recipients:
+                try:
+                    user_name = recipient.get('user_name', 'User')
+                    send_telegram_message_with_user_name(recipient['chat_id'], full_message, user_name)
+                    messages_sent += 1
+                    print(f"Bulk Deals: Sent alert to {user_name}")
+                except Exception as e:
+                    print(f"Bulk Deals: Failed to send to {recipient.get('user_name', 'Unknown')}: {e}")
+
+            # Record that we sent alerts for this date
+            _record_bulk_alert_sent(user_client, user_id, previous_trading_day, len(monitored_deals))
+
+            print(f"Bulk Deals: Sent {messages_sent} alerts for {len(monitored_deals)} deals on {previous_trading_day}")
+            return messages_sent
+
+        except ImportError:
+            # Fallback to original implementation if enhanced system not available
+            print("Bulk Deals: Enhanced system not available, using fallback")
+            monitor = BulkBlockDealsMonitor()
+
+            # Fetch all deals
+            all_deals = monitor.fetch_all_deals()
+
+            if not all_deals:
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"Bulk Deals: No deals found for any stocks")
+                return 0
+
+            # Filter by user's monitored stocks
+            filtered_deals = monitor.filter_deals_by_monitored_stocks(all_deals, monitored_scrips)
+
+            if not filtered_deals:
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"Bulk Deals: No deals found for user's monitored stocks")
+                return 0
+
+            # Check for new deals (not seen before)
+            new_deals = []
+            for deal in filtered_deals:
+                deal_id = monitor.create_deal_id(deal)
+
+                # Check if deal already seen
+                if not db_seen_deal_exists(user_client, user_id, deal_id):
+                    new_deals.append(deal)
+                    # Mark as seen
+                    db_save_seen_deal(user_client, user_id, deal_id, deal)
+
+            if not new_deals:
+                if os.environ.get('BSE_VERBOSE', '0') == '1':
+                    print(f"Bulk Deals: No new deals (all already processed)")
+                return 0
+
+            # Format message
+            message_text = monitor.format_deals_for_telegram(new_deals)
         
         if not message_text:
             return 0

@@ -707,14 +707,11 @@ def cron_master():
         # Job execution flags
         jobs_to_run = []
         
-        # 1. BSE ANNOUNCEMENTS - Always run (every 5 minutes, 24/7)
-        jobs_to_run.append({
-            'name': 'bse_announcements',
-            'condition': True,  # Always run
-            'reason': 'Continuous monitoring'
-        })
+        # BSE ANNOUNCEMENTS - REMOVED from master cron to prevent duplicates
+        # BSE announcements are now handled by dedicated /cron/bse_announcements endpoint
+        # This prevents double-triggering when both price spike and BSE crons run simultaneously
         
-        # 2. LIVE PRICE MONITORING - Only during market hours on working days
+        # 1. LIVE PRICE MONITORING - Only during market hours on working days
         if is_working_day and is_market_hours:
             jobs_to_run.append({
                 'name': 'live_price_monitoring', 
@@ -727,7 +724,7 @@ def cron_master():
                 'reason': f'Outside market hours or non-working day. Market: {is_market_hours}, Working day: {is_working_day}'
             })
         
-        # 3. NEWS MONITORING - Every 30 minutes (at :00 and :30)
+        # 2. NEWS MONITORING - Every 30 minutes (at :00 and :30)
         # Check if current minute is 0 or 30 (within ±2 minutes for tolerance)
         current_minute = now_ist.minute
         should_run_news = (
@@ -765,7 +762,7 @@ def cron_master():
                 'reason': f'Not scheduled time. Current: {now_ist.strftime("%H:%M")}, Target: :00/:30 (±2min)'
             })
         
-        # 4. DAILY SUMMARY - Once per day at 16:30 (after market close)
+        # 3. DAILY SUMMARY - Once per day at 16:30 (after market close)
         summary_time_target = now_ist.replace(hour=16, minute=30, second=0, microsecond=0)
         time_diff = abs((now_ist - summary_time_target).total_seconds() / 60)  # difference in minutes
         
@@ -919,9 +916,8 @@ def cron_master():
                     
                     try:
                         # Execute appropriate function based on job type
-                        if job_name == 'bse_announcements':
-                            sent = db.send_bse_announcements_consolidated(sb, uid, scrips, recipients, hours_back=1)
-                        elif job_name == 'live_price_monitoring':
+                        # Note: bse_announcements removed to prevent duplicates with dedicated /cron/bse_announcements
+                        if job_name == 'live_price_monitoring':
                             # Enhanced price spike alerts with debugging and lower thresholds
                             print(f"🔍 PRICE SPIKE: Processing {len(scrips)} scrips for user {uid[:8]}...")
                             from database import ist_market_window
@@ -1259,7 +1255,12 @@ def cron_rss_news():
 @app.route('/cron/bulk_deals')
 @log_errors
 def cron_bulk_deals():
-    """Dedicated endpoint for bulk/block deals monitoring during market hours"""
+    """Dedicated endpoint for daily bulk/block deals monitoring
+
+    Runs once daily to check previous trading day's bulk deals.
+    Bulk deals are typically available the next morning, so this checks
+    yesterday's data for any monitored stocks.
+    """
     key = request.args.get('key')
     expected = os.environ.get('CRON_SECRET_KEY')
     if not expected or key != expected:
@@ -1270,26 +1271,11 @@ def cron_bulk_deals():
         return "Supabase not configured", 500
 
     try:
-        from datetime import datetime
+        from datetime import datetime, date
         import uuid
-        
-        # Check if market is open and it's a working day
-        now_ist = db.ist_now()
-        is_market_hours, market_open, market_close = db.ist_market_window(now_ist)
-        is_working_day = now_ist.weekday() < 5
-        
-        if not (is_working_day and is_market_hours):
-            return jsonify({
-                "ok": True, 
-                "message": "Market closed - bulk deals monitoring skipped",
-                "market_hours": is_market_hours,
-                "working_day": is_working_day,
-                "current_time": now_ist.strftime('%Y-%m-%d %H:%M:%S'),
-                "market_open": market_open.strftime('%H:%M'),
-                "market_close": market_close.strftime('%H:%M')
-            })
-        
+
         run_id = str(uuid.uuid4())
+        job_name = 'bulk_deals_monitoring'
         
         # Get all users with scrips and recipients
         scrip_rows = sb.table('monitored_scrips').select('user_id, bse_code, company_name').execute().data or []

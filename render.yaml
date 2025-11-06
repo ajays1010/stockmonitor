@@ -80,18 +80,11 @@ services:
       - key: CRON_SECRET_KEY
         sync: false
 
-  # 3. BSE Announcements Monitoring (Every 5 minutes, 24/7)
-  - type: cron
-    name: bse-announcements-monitor
-    env: python
-    schedule: "*/5 * * * *"  # Every 5 minutes, 24 hours a day, 7 days a week
-    buildCommand: pip install -r requirements.txt
-    startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/bse_announcements?key=$CRON_SECRET_KEY" || exit 1
-    envVars:
-      - key: CRON_SECRET_KEY
-        sync: false
+  # 3. BSE Announcements Monitoring - REMOVED
+  # Now handled by external cron-job.org to prevent duplicates with master cron
+  # External service triggers: https://stockmonitor-aknr.onrender.com/cron/bse_announcements?key=$CRON_SECRET_KEY
 
-  # 4. Daily Bulk Deals Monitoring (Once daily at 9:00 AM IST)
+  # 3. Daily Bulk Deals Monitoring (Once daily at 9:00 AM IST)
   - type: cron
     name: daily-bulk-deals
     env: python
