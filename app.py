@@ -188,13 +188,23 @@ def _get_memory_usage_fast():
     except:
         return 0
 
-# Clear cache every 10 seconds - RE-ENABLED with proper error handling
+# Clear cache every 30 seconds - OPTIMIZED for memory efficiency
 def _clear_memory_cache():
     try:
         _get_memory_usage_fast.cache_clear()
-        # Re-enabled with safer threading approach
+
+        # Force garbage collection to free memory
+        import gc
+        gc.collect()
+
+        # Log memory usage if verbose mode enabled
+        if os.environ.get('MEMORY_VERBOSE', '0') == '1':
+            current_memory = _get_memory_usage_fast()
+            print(f"Memory cleanup completed: {current_memory} MB")
+
+        # Re-enabled with safer threading approach and longer interval
         if not app.debug and not os.environ.get('DISABLE_AUTO_CLEANUP'):
-            timer = threading.Timer(10.0, _clear_memory_cache)
+            timer = threading.Timer(30.0, _clear_memory_cache)  # Increased from 10s to 30s
             timer.daemon = True  # Set as daemon thread to prevent blocking shutdown
             timer.start()
     except Exception as e:

@@ -1360,13 +1360,21 @@ def fetch_bse_announcements_for_scrip(scrip_code: str, since_dt, allowed_categor
     return results
 
 def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scrips, telegram_recipients, hours_back: int = 24) -> int:
-    # Import the enhanced deduplication tracker
+    # Import the PERSISTENT deduplication tracker (survives worker restarts)
     try:
-        from bse_dedup_tracker import is_bse_duplicate, mark_bse_sent
+        from bse_persistent_tracker import is_persistent_bse_duplicate, mark_persistent_bse_sent
+        def is_bse_duplicate(*args, **kwargs):
+            return is_persistent_bse_duplicate(*args, **kwargs)
+        def mark_bse_sent(*args, **kwargs):
+            return mark_persistent_bse_sent(*args, **kwargs)
     except ImportError:
-        # Fallback if tracker not available
-        def is_bse_duplicate(*args, **kwargs): return (False, "tracker_unavailable")
-        def mark_bse_sent(*args, **kwargs): pass
+        # Fallback to original tracker if persistent tracker not available
+        try:
+            from bse_dedup_tracker import is_bse_duplicate, mark_bse_sent
+        except ImportError:
+            # Final fallback if no tracker available
+            def is_bse_duplicate(*args, **kwargs): return (False, "tracker_unavailable")
+            def mark_bse_sent(*args, **kwargs): pass
 
     # Build a lookup from bse_code to company_name for friendly messages
     code_to_name = {}
