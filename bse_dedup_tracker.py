@@ -35,7 +35,7 @@ class BSEAnnouncementTracker:
         self._global_duplicate_window = 7200  # 2 hours - prevent same announcement globally
         self._user_duplicate_window = 86400   # 24 hours - prevent per-user duplicates
         self._hash_duplicate_window = 3600    # 1 hour - prevent similar content
-        self._rapid_refetch_window = 120      # 2 minutes - prevent rapid API refetch duplicates
+        self._rapid_refetch_window = 420      # 7 minutes - prevent rapid API refetch duplicates (covers 5-min cron + buffer)
 
         # Enable verbose logging
         self._verbose = os.environ.get('BSE_VERBOSE', '0') == '1'

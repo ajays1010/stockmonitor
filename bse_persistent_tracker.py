@@ -42,7 +42,7 @@ class PersistentBSETracker:
         self._global_duplicate_window = 7200  # 2 hours
         self._user_duplicate_window = 86400   # 24 hours
         self._hash_duplicate_window = 3600    # 1 hour
-        self._rapid_refetch_window = 120      # 2 minutes
+        self._rapid_refetch_window = 420      # 7 minutes (covers 5-min cron + buffer)
 
         # Thread safety
         self._lock = threading.RLock()
@@ -203,7 +203,9 @@ class PersistentBSETracker:
                 time_diff = current_time - self._recent_announcements[news_id]
                 if time_diff < self._rapid_refetch_window:
                     if self._verbose:
-                        print(f"PERSISTENT BSE DUPLICATE: Rapid refetch prevented for {news_id} ({time_diff:.1f}s ago)")
+                        remaining_time = self._rapid_refetch_window - time_diff
+                        print(f"🚫 PERSISTENT BSE DUPLICATE: Rapid refetch prevented for {news_id}")
+                        print(f"   Time since last: {time_diff:.1f}s, Window: {self._rapid_refetch_window}s, Remaining: {remaining_time:.1f}s")
                     return True, f"rapid_refetch_{time_diff:.0f}s"
 
             # 2. Check global duplicate window

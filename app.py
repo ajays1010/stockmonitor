@@ -1003,7 +1003,26 @@ def cron_master():
 @app.route('/cron/bse_announcements')
 @log_errors
 def cron_bse_announcements():
-    """Dedicated endpoint for BSE announcements only"""
+    """Dedicated endpoint for BSE announcements only - DISABLED on multiuser-bse-monitor
+
+    This endpoint is DISABLED on multiuser-bse-monitor.onrender.com to prevent duplicates.
+    BSE announcements are now handled exclusively by stockmonitor-aknr.onrender.com via external cron-job.org.
+    """
+    # Check if BSE announcements are explicitly disabled
+    import os
+    disable_bse = os.environ.get('DISABLE_BSE_ANNOUNCEMENTS', 'false').lower() == 'true'
+    if disable_bse:
+        return "BSE announcements endpoint is explicitly disabled via DISABLE_BSE_ANNOUNCEMENTS=true", 403
+
+    # Check if this is the multiuser deployment and disable the endpoint
+    app_url = os.environ.get('APP_URL', '') or os.environ.get('RENDER_EXTERNAL_URL', '')
+    host = request.headers.get('Host', '')
+
+    # Disable if this appears to be the multiuser deployment
+    if 'multiuser-bse-monitor' in app_url or host.startswith('multiuser-bse-monitor'):
+        return "BSE announcements endpoint is disabled on multiuser-bse-monitor deployment. Please use stockmonitor-aknr.onrender.com/cron/bse_announcements", 403
+
+    # Original authentication check for stockmonitor deployment
     key = request.args.get('key')
     expected = os.environ.get('CRON_SECRET_KEY')
     if not expected or key != expected:
